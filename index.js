@@ -186,6 +186,7 @@ function stringify(input, type) {
 	}
 }
 
+class VecU8 extends Uint8Array { toJSON() { return { _type: 'VecU8', data: Array.from(this) } }}
 class AccountId extends Uint8Array { toJSON() { return { _type: 'AccountId', data: Array.from(this) } }}
 class Hash extends Uint8Array { toJSON() { return { _type: 'Hash', data: Array.from(this) } }}
 class VoteThreshold extends String { toJSON() { return { _type: 'VoteThreshold', data: this + ''} }}
@@ -218,6 +219,7 @@ class Call extends CallProposal {
 function reviver(key, bland) {
 	if (typeof bland == 'object' && bland) {
 		switch (bland._type) {
+			case 'VecU8': return new VecU8(bland.data);
 			case 'AccountId': return new AccountId(bland.data);
 			case 'Hash': return new Hash(bland.data);
 			case 'VoteThreshold': return new VoteThreshold(bland.data);
@@ -360,7 +362,7 @@ function pretty(expr) {
 	if (expr instanceof Tuple) {
 		return '(' + expr.map(pretty).join(', ') + ')';
 	}
-	if (expr instanceof Uint8Array) {
+	if (expr instanceof VecU8 || expr instanceof Uint8Array) {
 		return '[' + bytesToHex(expr) + ']';
 	}
 	if (expr instanceof Array) {
@@ -407,7 +409,7 @@ function indexOf(pubkey) {
 }
 
 function stringToSeed(s) {
-	var data = new Uint8Array(32);
+	var data = new VecU8(32);
 	data.fill(32);
 	for (var i = 0; i < s.length; i++){
 		data[i] = s.charCodeAt(i);
@@ -415,7 +417,7 @@ function stringToSeed(s) {
 	return data;
 }
 function stringToBytes(s) {
-	var data = new Uint8Array(s.length);
+	var data = new VecU8(s.length);
 	for (var i = 0; i < s.length; i++){
 		data[i] = s.charCodeAt(i);
 	}
@@ -423,14 +425,14 @@ function stringToBytes(s) {
 }
 function hexToBytes(str) {
 	if (!str) {
-		return new Uint8Array();
+		return new VecU8();
 	}
 	var a = [];
 	for (var i = str.startsWith('0x') ? 2 : 0, len = str.length; i < len; i += 2) {
 		a.push(parseInt(str.substr(i, 2), 16));
 	}
 
-	return new Uint8Array(a);
+	return new VecU8(a);
 }
 function bytesToHex(uint8arr) {
 	if (!uint8arr) {
@@ -462,7 +464,7 @@ function leHexToNumber(le) {
 }
 
 function toLE(val, bytes) {
-	let r = new Uint8Array(bytes);
+	let r = new VecU8(bytes);
 	for (var o = 0; val > 0; ++o) {
 		r[o] = val % 256;
 		val /= 256;
@@ -546,7 +548,7 @@ class Polkadot {
 			let prefixBytes = stringToBytes(prefix);
 			return argBond => postApply((new TransformBond(
 				arg => {
-					let loc = new Uint8Array([...prefixBytes, ...formatArg(arg)]);
+					let loc = new VecU8([...prefixBytes, ...formatArg(arg)]);
 					let k = '0x' + toLEHex(XXH.h64(loc.buffer, 0), 8) + toLEHex(XXH.h64(loc.buffer, 1), 8);
 					return req('state_getStorage', [k])
 						.then(r => formatResult(r && hexToBytes(r), arg));
@@ -674,7 +676,7 @@ class Polkadot {
 			let referendumCount = storageValue('dem:rco', r => r ? leToNumber(r) : 0);
 			let nextTally = storageValue('dem:nxt', r => r ? leToNumber(r) : 0);
 			let referendumVoters = storageMap('dem:vtr:', r => r ? deslice(r, 'Vec<AccountId>') : [], i => toLE(i, 4));
-			let referendumVoteOf = storageMap('dem:vot:', r => r && !!r[0], i => new Uint8Array([...toLE(i[0], 4), ...i[1]]));
+			let referendumVoteOf = storageMap('dem:vot:', r => r && !!r[0], i => new VecU8([...toLE(i[0], 4), ...i[1]]));
 			let referendumInfoOf = storageMap('dem:pro:', (r, index) => {
 				if (r == null) return null;
 				let [ends, proposal, voteThreshold] = deslice(r, ['BlockNumber', 'Proposal', 'VoteThreshold']);
@@ -734,7 +736,7 @@ class Polkadot {
 
 		{
 			let proposalVoters = storageMap('cov:voters:', r => r && deslice(r, 'Vec<AccountId>'));
-			let proposalVoteOf = storageMap('cov:vote:', r => r && !!r[0], i => new Uint8Array([...i[0], ...i[1]]));
+			let proposalVoteOf = storageMap('cov:vote:', r => r && !!r[0], i => new VecU8([...i[0], ...i[1]]));
 			this.councilVoting = {
 				cooloffPeriod: storageValue('cov:cooloff', r => deslice(r, 'BlockNumber')),
 				votingPeriod: storageValue('cov:period', r => deslice(r, 'BlockNumber')),
