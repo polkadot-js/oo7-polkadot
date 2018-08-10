@@ -363,7 +363,7 @@ function pretty(expr) {
 		return '(' + expr.map(pretty).join(', ') + ')';
 	}
 	if (expr instanceof VecU8 || expr instanceof Uint8Array) {
-		if (expr.len() <= 256) {
+		if (expr.length <= 256) {
 			return '[' + bytesToHex(expr) + ']';
 		} else {
 			return `[${bytesToHex(expr.slice(0, 256))}...] (${expr.length} bytes)`;
@@ -373,7 +373,14 @@ function pretty(expr) {
 		return '[' + expr.map(pretty).join(', ') + ']';
 	}
 	if (expr instanceof Call || expr instanceof Proposal) {
-		return expr.module + '.' + expr.name + '(' + expr.params.map(p => p.name + '=' + pretty(p.value)).join(', ') + ')';
+		return expr.module + '.' + expr.name + '(' + expr.params.map(p => {
+			let v = p.value;
+			if (v.length < 255) {
+				return p.name + '=' + pretty(p.value);
+			} else {
+				return p.name + '= [...]';
+			}
+		}).join(', ') + ')';
 	}
 	if (typeof expr === 'object') {
 		return '{' + Object.keys(expr).map(k => k + ': ' + pretty(expr[k])).join(', ') + '}';
