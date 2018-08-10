@@ -363,7 +363,11 @@ function pretty(expr) {
 		return '(' + expr.map(pretty).join(', ') + ')';
 	}
 	if (expr instanceof VecU8 || expr instanceof Uint8Array) {
-		return '[' + bytesToHex(expr) + ']';
+		if (expr.len() <= 256) {
+			return '[' + bytesToHex(expr) + ']';
+		} else {
+			return `[${bytesToHex(expr.slice(0, 256))}...] (${expr.length} bytes)`;
+		}
 	}
 	if (expr instanceof Array) {
 		return '[' + expr.map(pretty).join(', ') + ']';
