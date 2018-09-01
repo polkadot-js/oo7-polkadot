@@ -139,6 +139,9 @@ function stringify(input, type) {
 			input.data = input.data.slice(1);
 			return res;
 		}
+		case 'SlashPreference': {
+			return new SlashPrefence(stringify(input, 'u32'));
+		}
 		case 'u32':
 		case 'VoteIndex':
 		case 'PropIndex':
@@ -190,6 +193,9 @@ class VecU8 extends Uint8Array { toJSON() { return { _type: 'VecU8', data: Array
 class AccountId extends Uint8Array { toJSON() { return { _type: 'AccountId', data: Array.from(this) } }}
 class Hash extends Uint8Array { toJSON() { return { _type: 'Hash', data: Array.from(this) } }}
 class VoteThreshold extends String { toJSON() { return { _type: 'VoteThreshold', data: this + ''} }}
+class SlashPreference extends Number {
+	toJSON() { return { _type: 'SlashPreference', data: this+0 } }
+}
 class Moment extends Date {
 	constructor(seconds) {
 		super(seconds * 1000)
@@ -223,6 +229,7 @@ function reviver(key, bland) {
 			case 'AccountId': return new AccountId(bland.data);
 			case 'Hash': return new Hash(bland.data);
 			case 'VoteThreshold': return new VoteThreshold(bland.data);
+			case 'SlashPreference': return new SlashPreference(bland.data);
 			case 'Moment': return new Moment(bland.data);
 			case 'Tuple': return new Tuple(bland.data);
 			case 'Proposal': return new Proposal(bland.data);
@@ -287,6 +294,9 @@ function deslice(input, type) {
 			input.data = input.data.slice(1);
 			return res;
 		}
+		case 'SlashPreference': {
+			return new SlashPreference(deslice(input, 'u32'));
+		}
 		case 'u32':
 		case 'VoteIndex':
 		case 'PropIndex':
@@ -333,8 +343,14 @@ function deslice(input, type) {
 	}
 }
 
-const numberWithCommas = (x) => {
-	return x.toString().replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+const numberWithCommas = n => {
+	let x = n.toString();
+	if (x.indexOf('.') > -1) {
+		let [a, b] = x.split('.');
+		return numberWithCommas(a) + '.' + b;
+	} else {
+		return x.replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+	}
 }
 
 function pretty(expr) {
@@ -344,8 +360,23 @@ function pretty(expr) {
 	if (expr instanceof VoteThreshold) {
 		return 'VoteThreshold.' + expr;
 	}
+	if (expr instanceof VoteThreshold) {
+		return 'SlashPreference{unstake_threshold=' + expr + '}';
+	}
 	if (expr instanceof Balance) {
-		return numberWithCommas(expr) + ' DOT';
+		return (
+			expr > 1000000000
+			? numberWithCommas(Math.round(expr / 1000000)) + ' DOT'
+			: expr > 100000000
+			? numberWithCommas(Math.round(expr / 100000) / 10) + ' DOT'
+			: expr > 10000000
+			? numberWithCommas(Math.round(expr / 10000) / 100) + ' DOT'
+			: expr > 1000000
+			? numberWithCommas(Math.round(expr / 1000) / 1000) + ' DOT'
+			: expr > 100000
+			? numberWithCommas(Math.round(expr / 100) / 10000) + ' DOT'
+			: numberWithCommas(expr) + ' µDOT'
+		);
 	}
 	if (expr instanceof BlockNumber) {
 		return numberWithCommas(expr);
@@ -374,9 +405,9 @@ function pretty(expr) {
 	}
 	if (expr instanceof Call || expr instanceof Proposal) {
 		return expr.module + '.' + expr.name + '(' + expr.params.map(p => {
-			let v = p.value;
+			let v = pretty(p.value);
 			if (v.length < 255) {
-				return p.name + '=' + pretty(p.value);
+				return p.name + '=' + v;
 			} else {
 				return p.name + '= [...]';
 			}
@@ -539,6 +570,15 @@ function tallyAmounts(x) {
 	return {aye: r[1], nay: r[0]};
 }
 
+function storageValueKey(stringLocation) {
+	let loc = stringToBytes(stringLocation);
+	return '0x' + toLEHex(XXH.h64(loc.buffer, 0), 8) + toLEHex(XXH.h64(loc.buffer, 1), 8);
+}
+function storageMapKey(prefixString, arg) {
+	let loc = new VecU8([...stringToBytes(prefixString), ...arg]);
+	return '0x' + toLEHex(XXH.h64(loc.buffer, 0), 8) + toLEHex(XXH.h64(loc.buffer, 1), 8);
+}
+
 class Polkadot {
 	constructor () {
 		let head = new TransformBond(() => req('chain_getHead'), [], [new TimeBond])
@@ -549,12 +589,6 @@ class Polkadot {
 		this.code = new TransformBond(() => req('state_getStorage', ['0x' + bytesToHex(stringToBytes(":code"))]).then(hexToBytes), [], [head]);
 		this.codeHash = new TransformBond(() => req('state_getStorageHash', ['0x' + bytesToHex(stringToBytes(":code"))]).then(hexToBytes), [], [head]);
 		this.codeSize = new TransformBond(() => req('state_getStorageSize', ['0x' + bytesToHex(stringToBytes(":code"))]), [], [head]);
-		this.authorityCount = new TransformBond(() => req('state_getStorage', ['0x' + bytesToHex(stringToBytes(":auth:len"))]).then(leHexToNumber), [], [head]);
-		this.authorities = this.authorityCount.map(
-			n => [...Array(n)].map((_, i) =>
-				req('state_getStorage', ['0x' + bytesToHex(stringToBytes(":auth:")) + bytesToHex(toLE(i, 4))])
-					.then(r => r ? deslice(hexToBytes(r), 'AccountId') : null)
-			), 2);
 		function storageMap(prefix, formatResult = r => r, formatArg = x => x, postApply = x => x) {
 			let prefixBytes = stringToBytes(prefix);
 			return argBond => postApply((new TransformBond(
@@ -568,14 +602,10 @@ class Polkadot {
 				[head]
 			)).subscriptable());
 		}
-		function storageValueKey(stringLocation) {
-			let loc = stringToBytes(stringLocation);
-			return '0x' + toLEHex(XXH.h64(loc.buffer, 0), 8) + toLEHex(XXH.h64(loc.buffer, 1), 8);
-		}
-		function storageValue(stringLocation, formatResult = r => r) {
+		function storageValue(stringLocation, formatResult = r => r, formatLocation = storageValueKey) {
 			return (new TransformBond(
 				arg => {
-					return req('state_getStorage', [storageValueKey(stringLocation)]).then(r => formatResult(r && hexToBytes(r), arg))
+					return req('state_getStorage', [formatLocation(stringLocation)]).then(r => formatResult(r && hexToBytes(r), arg))
 				},
 				[],
 				[head]
@@ -585,6 +615,17 @@ class Polkadot {
 		this.system = {
 			index: storageMap('sys:non', r => r ? leToNumber(r) : 0)
 		};
+
+		this.consensus = {
+			authorityCount: new TransformBond(() => req('state_getStorage', ['0x' + bytesToHex(stringToBytes(":auth:len"))]).then(leHexToNumber), [], [head])
+		};
+
+		this.consensus.authorities = this.consensus.authorityCount.map(
+			n => [...Array(n)].map((_, i) => storageValue(
+				'0x' + bytesToHex(stringToBytes(":auth:")) + bytesToHex(toLE(i, 4)), 
+				r => r ? deslice(r, 'T::AccountId') : null,
+				x => x
+			)), 2);
 
 		this.timestamp = {
 			blockPeriod: storageValue('tim:block_period', r => deslice(r, 'T::Moment')),
@@ -605,16 +646,15 @@ class Polkadot {
 				c = (c || 0);
 				return l - (h - c + l) % l;
 			});
-		this.session.percentLate = Bond
+		this.session.lateness = Bond
 			.all([
 				this.timestamp.blockPeriod,
 				this.timestamp.now,
 				this.session.blocksRemaining,
 				this.session.length,
 				this.session.currentStart,
-			]).map(([p, n, r, l, s]) =>
-				Math.round((n.number + p.number * r - s.number) / (p.number * l) * 100 - 100)
-			);
+			]).map(([p, n, r, l, s]) => (n.number + p.number * r - s.number) / (p.number * l));
+		this.session.percentLate = this.session.lateness.map(l => Math.round(l * 100 - 100));
 
 		this.staking = {
 			freeBalance: storageMap('sta:bal:', r => r ? deslice(r, 'T::Balance') : new Balance(0)),
@@ -625,8 +665,15 @@ class Polkadot {
 			lastEraLengthChange: storageValue('sta:lec', r => r ? deslice(r, 'T::BlockNumber') : new BlockNumber(0)),
 			validatorCount: storageValue('sta:vac', r => r ? deslice(r, 'u32') : 0),
 			nominatorsFor: storageMap('sta:nominators_for', r => r ? deslice(r, 'Vec<T::AccountId>') : []),
-			currentNominatorsFor: storageMap('sta:current_nominators_for', r => r ? deslice(r, 'Vec<T::AccountId>') : [])
+			currentNominatorsFor: storageMap('sta:current_nominators_for', r => r ? deslice(r, 'Vec<T::AccountId>') : []),
+			earlyEraSlash: storageValue('sta:early_era_slash', r => r ? deslice(r, 'T::Balance') : new Balance(0)),
+			sessionReward: storageValue('sta:session_reward', r => r ? deslice(r, 'T::Balance') : new Balance(0)),
+			offlineSlashGrace: storageValue('sta:offline_slash_grace', r => r ? deslice(r, 'u32') : 0),
+			slashPreferenceOf: storageMap('sta:slash_preference_of', r => r ? deslice(r, 'SlashPreference') : new SlashPreference)
 		};
+		this.staking.thisSessionReward = Bond
+			.all([this.staking.sessionReward, this.session.lateness])
+			.map(([r, l]) => Math.round(r / l));
 		this.staking.currentNominatedBalance = who => this.staking.currentNominatorsFor(who)
 			.map(ns => ns.map(n => this.staking.votingBalance(n)), 2)
 			.map(bs => new Balance(bs.reduce((a, b) => a + b, 0)))
@@ -649,16 +696,41 @@ class Polkadot {
 				this.staking.sessionsPerEra,
 				this.session.length
 			]).map(([a, b]) => a * b);
+		
+		this.staking.validators = this.session.validators
+			.map(v => v.map(who => ({
+				who,
+				ownBalance: this.staking.votingBalance(who),
+				otherBalance: this.staking.currentNominatedBalance(who),
+				nominators: this.staking.currentNominatorsFor(who)
+			})), 2)
+			.map(v => v
+				.map(i => Object.assign({balance: i.ownBalance.add(i.otherBalance)}, i))
+				.sort((a, b) => b.balance - a.balance)
+			);
+
+		this.staking.nextThreeUp = this.staking.intentions.map(
+			l => ([this.session.validators, l.map(who => ({
+				who, ownBalance: this.staking.votingBalance(who), otherBalance: this.staking.nominatedBalance(who)
+			}) ) ]), 3
+		).map(([c, l]) => l
+			.map(i => Object.assign({balance: i.ownBalance.add(i.otherBalance)}, i))
+			.sort((a, b) => b.balance - a.balance)
+			.filter(i => !c.some(x => x+'' == i.who+''))
+			.slice(0, 3)
+		);
+
 		this.staking.nextValidators = Bond
 			.all([
-				this.staking.intentions.map(as => as.map(a => ({
-					who: a,
-					ownBalance: this.staking.votingBalance(a),
-					otherBalance: this.staking.nominatedBalance(a)
+				this.staking.intentions.map(v => v.map(who => ({
+					who,
+					ownBalance: this.staking.votingBalance(who),
+					otherBalance: this.staking.nominatedBalance(who),
+					nominators: this.staking.nominatorsFor(who)
 				})), 2),
 				this.staking.validatorCount
 			]).map(([as, vc]) => as
-				.map(i => Object.assign({balance: new Balance(i.ownBalance + i.otherBalance)}, i))
+				.map(i => Object.assign({balance: i.ownBalance.add(i.otherBalance)}, i))
 				.sort((a, b) => b.balance - a.balance)
 				.slice(0, vc)
 			);
@@ -762,23 +834,27 @@ class Polkadot {
 
 		if (typeof window !== 'undefined') {
 			window.polkadot = this;
-			window.req = req;
-			window.ss58_encode = ss58_encode;
-			window.ss58_decode = ss58_decode;
-			window.bytesToHex = bytesToHex;
-			window.stringToBytes = stringToBytes;
-			window.hexToBytes = hexToBytes;
-			window.that = this;
 			window.storageMap = storageMap;
 			window.storageValue = storageValue;
-			window.storageValueKey = storageValueKey;
-			window.toLE = toLE;
-			window.leToNumber = leToNumber;
-			window.stringify = stringify;
-			window.pretty = pretty;
-			window.deslice = deslice;
 		}
 	}
+}
+
+if (typeof window !== 'undefined') {
+	window.req = req;
+	window.ss58_encode = ss58_encode;
+	window.ss58_decode = ss58_decode;
+	window.bytesToHex = bytesToHex;
+	window.stringToBytes = stringToBytes;
+	window.hexToBytes = hexToBytes;
+	window.that = this;
+	window.storageMapKey = storageMapKey;
+	window.storageValueKey = storageValueKey;
+	window.toLE = toLE;
+	window.leToNumber = leToNumber;
+	window.stringify = stringify;
+	window.pretty = pretty;
+	window.deslice = deslice;
 }
 
 module.exports = { ss58_decode, ss58_encode, Calls, pretty, req, balanceOf, indexOf,

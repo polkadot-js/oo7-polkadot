@@ -1,6 +1,6 @@
 {
   "name": "oo7-polkadot",
-  "version": "1.0.4",
+  "version": "1.0.14",
   "description": "Polkadot Bonds library",
   "main": "index.js",
   "scripts": {
