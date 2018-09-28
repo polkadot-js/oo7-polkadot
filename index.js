@@ -2,80 +2,7 @@ const {Bond, TimeBond, TransformBond} = require('oo7');
 const XXH = require('xxhashjs');
 const {ss58_decode, ss58_encode} = require('ss58');
 require('isomorphic-fetch');
-
-const Calls = {0: {
-	name: 'consensus',
-	calls: interpretRustCalls(`
-fn report_misbehavior(aux, report: MisbehaviorReport) = 0;
-	`),
-	priv_calls: interpretRustCalls(`
-fn set_code(new: Vec<u8>) = 0;
-fn set_storage(items: Vec<KeyValue>) = 1;
-	`)
-}, 1: {
-	name: 'session',
-	calls: interpretRustCalls(`
-fn set_key(aux, key: T::SessionKey) = 0;
-	`),
-	priv_calls: interpretRustCalls(`
-fn set_length(new: T::BlockNumber) = 0;
-fn force_new_session() = 1;
-	`)
-}, 2: {
-	name: 'staking',
-	calls: interpretRustCalls(`
-fn transfer(aux, dest: T::AccountId, value: T::Balance) = 0;
-fn stake(aux) = 1;
-fn unstake(aux) = 2;
-	`),
-	priv_calls: interpretRustCalls(`
-fn set_sessions_per_era(new: T::BlockNumber) = 0;
-fn set_bonding_duration(new: T::BlockNumber) = 1;
-fn set_validator_count(new: u32) = 2;
-fn force_new_era() = 3;
-	`)
-}, 3: {
-	name: 'timestamp',
-	calls: [],
-	priv_calls: []
-}, 5: {
-	name: 'democracy',
-	calls: interpretRustCalls(`
-fn propose(aux, proposal: Box<T::Proposal>, value: T::Balance) = 0;
-fn second(aux, proposal: PropIndex) = 1;
-fn vote(aux, ref_index: ReferendumIndex, approve_proposal: bool) = 2;
-	`),
-	priv_calls: interpretRustCalls(`
-fn start_referendum(proposal: Box<T::Proposal>, vote_threshold: VoteThreshold) = 0;
-fn cancel_referendum(ref_index: ReferendumIndex) = 1;
-	`)
-}, 6: {
-	name: 'council',
-	calls: interpretRustCalls(`
-fn set_approvals(aux, votes: Vec<bool>, index: VoteIndex) = 0;
-fn reap_inactive_voter(aux, signed_index: u32, who: T::AccountId, who_index: u32, assumed_vote_index: VoteIndex) = 1;
-fn retract_voter(aux, index: u32) = 2;
-fn submit_candidacy(aux, slot: u32) = 3;
-fn present_winner(aux, candidate: T::AccountId, total: T::Balance, index: VoteIndex) = 4;
-	`),
-	priv_calls: interpretRustCalls(`
-fn set_desired_seats(count: u32) = 0;
-fn remove_member(who: T::AccountId) = 1;
-fn set_presentation_duration(count: T::BlockNumber) = 2;
-fn set_term_duration(count: T::BlockNumber) = 3;
-	`)
-}, 7: {
-	name: 'council_voting',
-	calls: interpretRustCalls(`
-fn propose(aux, proposal: Box<T::Proposal>) = 0;
-fn vote(aux, proposal: T::Hash, approve: bool) = 1;
-fn veto(aux, proposal_hash: T::Hash) = 2;
-	`),
-	priv_calls: interpretRustCalls(`
-fn set_cooloff_period(blocks: T::BlockNumber) = 0;
-fn set_voting_period(blocks: T::BlockNumber) = 1;
-	`)
-}};
+/*
 function interpretRustCalls(s) {
 	var r = {};
 	s.split('\n')
@@ -94,100 +21,7 @@ function interpretRustCalls(s) {
 		});
 	return r;
 }
-
-function stringify(input, type) {
-	if (typeof type === 'object') {
-		return type.map(t => stringify(input, t));
-	}
-	switch (type) {
-		case 'Call': {
-			let c = Calls[input.data[0]];
-			let res = c.name + '.';
-			c = c.calls[input.data[1]];
-			input.data = input.data.slice(2);
-			return res + c.name + '(' + c.params.map(p => p.name + "=" + stringify(input, p.type)).join(', ') + ')';
-		}
-		case 'Proposal': {
-			let c = Calls[input.data[0]];
-			let res = c.name + '.';
-			c = c.priv_calls[input.data[1]];
-			input.data = input.data.slice(2);
-			return res + c.name + '(' + c.params.map(p => p.name + "=" + stringify(input, p.type)).join(', ') + ')';
-		}
-		case 'AccountId': {
-			let res = ss58_encode(input.data.slice(0, 32));
-			input.data = input.data.slice(32);
-			return res;
-		}
-		case 'Hash': {
-			let res = '0x' + bytesToHex(input.data.slice(0, 32));
-			input.data = input.data.slice(32);
-			return res;
-		}
-		case 'Balance':
-			let res = '' + leToNumber(input.data.slice(0, 16));
-			input.data = input.data.slice(16);
-			return res;
-		case 'BlockNumber': {
-			let res = '' + leToNumber(input.data.slice(0, 8));
-			input.data = input.data.slice(8);
-			return res;
-		}
-		case 'VoteThreshold': {
-			const VOTE_THRESHOLD = ['SuperMajorityApprove', 'NotSuperMajorityAgainst', 'SimpleMajority'];
-			let res = VOTE_THRESHOLD[input.data[0]];
-			input.data = input.data.slice(1);
-			return res;
-		}
-		case 'SlashPreference': {
-			return new SlashPrefence(stringify(input, 'u32'));
-		}
-		case 'u32':
-		case 'VoteIndex':
-		case 'PropIndex':
-		case 'ReferendumIndex': {
-			let res = '' + leToNumber(input.data.slice(0, 4));
-			input.data = input.data.slice(4);
-			return res;
-		}
-		case 'bool': {
-			let res = input.data[0] ? 'true' : 'false';
-			input.data = input.data.slice(1);
-			return res;
-		}
-		case 'KeyValue': {
-			return stringify(input, '(Vec<u8>, Vec<u8>)');
-		}
-		case 'Vec<bool>': {
-			let size = leToNumber(input.data.slice(0, 4));
-			input.data = input.data.slice(4);
-			let res = '[' + [...input.data.slice(0, size)].join('') + ']';
-			input.data = input.data.slice(size);
-			return res;
-		}
-		case 'Vec<u8>': {
-			let size = leToNumber(input.data.slice(0, 4));
-			input.data = input.data.slice(4);
-			let res = '[' + bytesToHex(input.data.slice(0, size)) + ']';
-			input.data = input.data.slice(size);
-			return res;
-		}
-		default: {
-			let v = type.match(/^Vec<(.*)>$/);
-			if (v) {
-				let size = leToNumber(input.data.slice(0, 4));
-				input.data = input.data.slice(4);
-				let res = '[' + [...new Array(size)].map(() => stringify(input, v[1])).join(', ') + ']';
-				return res;
-			}
-			let t = type.match(/^\((.*)\)$/);
-			if (t) {
-				return '(' + stringify(input, t[1].split(', ')).join(', ') + ')';
-			}
-			throw 'Unknown type to stringify: ' + type;
-		}
-	}
-}
+*/
 
 class VecU8 extends Uint8Array { toJSON() { return { _type: 'VecU8', data: Array.from(this) } }}
 class AccountId extends Uint8Array { toJSON() { return { _type: 'AccountId', data: Array.from(this) } }}
@@ -241,6 +75,24 @@ function reviver(key, bland) {
 	return bland;
 }
 
+let transforms = {
+	RuntimeMetadata: { outerEvent: 'OuterEventMetadata', modules: 'Vec<RuntimeModuleMetadata>' },
+	RuntimeModuleMetadata: { prefix: 'String', module: 'ModuleMetadata', storage: 'Option<StorageMetadata>' },
+	StorageFunctionModifier: { _enum: [ 'None', 'Default', 'Required' ] },
+	StorageFunctionTypeMap: { key: 'Type', value: 'Type' },
+	StorageFunctionType: { _enum: { Plain: 'Type', Map: 'StorageFunctionTypeMap' } },
+	StorageFunctionMetadata: { name: 'String', modifier: 'StorageFunctionModifier', ty: 'StorageFunctionType', documentation: 'Vec<String>' },
+	StorageMetadata: { prefix: 'String', functions: 'Vec<StorageFunctionMetadata>' },
+	EventMetadata: { name: 'String', arguments: 'Vec<Type>', documentation: 'Vec<String>' },
+	OuterEventMetadata: { name: 'String', events: 'Vec<(String, Vec<EventMetadata>)>' },
+	ModuleMetadata: { name: 'String', call: 'CallMetadata' },
+	CallMetadata: { name: 'String', functions: 'Vec<FunctionMetadata>' },
+	FunctionMetadata: { id: 'u16', name: 'String', arguments: 'Vec<FunctionArgumentMetadata>', documentation: 'Vec<String>' },
+	FunctionArgumentMetadata: { name: 'String', ty: 'Type' }
+};
+
+var deslicePrefix = 0;
+
 function deslice(input, type) {
 	if (typeof input.data === 'undefined') {
 		input = { data: input };
@@ -251,117 +103,187 @@ function deslice(input, type) {
 	while (type.startsWith('T::')) {
 		type = type.slice(3);
 	}
-	switch (type) {
-		case 'Call':
-		case 'Proposal': {
-			let c = Calls[input.data[0]];
-			let res = type === 'Call' ? new Call : new Proposal;
-			res.module = c.name;
-			c = c[type == 'Call' ? 'calls' : 'priv_calls'][input.data[1]];
-			input.data = input.data.slice(2);
-			res.name = c.name;
-			res.params = c.params.map(p => ({ name: p.name, type: p.type, value: deslice(input, p.type) }));
-			return res;
-		}
-		case 'AccountId': {
-			let res = new AccountId(input.data.slice(0, 32));
-			input.data = input.data.slice(32);
-			return res;
-		}
-		case 'Hash': {
-			let res = new Hash(input.data.slice(0, 32));
-			input.data = input.data.slice(32);
-			return res;
-		}
-		case 'Balance': {
-			let res = leToNumber(input.data.slice(0, 16));
-			input.data = input.data.slice(16);
-			return new Balance(res);
-		}
-		case 'BlockNumber': {
-			let res = leToNumber(input.data.slice(0, 8));
-			input.data = input.data.slice(8);
-			return new BlockNumber(res);
-		}
-		case 'Moment': {
-			let n = leToNumber(input.data.slice(0, 8));
-			input.data = input.data.slice(8);
-			return new Moment(n);
-		}
-		case 'VoteThreshold': {
-			const VOTE_THRESHOLD = ['SuperMajorityApprove', 'NotSuperMajorityAgainst', 'SimpleMajority'];
-			let res = new VoteThreshold(VOTE_THRESHOLD[input.data[0]]);
-			input.data = input.data.slice(1);
-			return res;
-		}
-		case 'SlashPreference': {
-			return new SlashPreference(deslice(input, 'u32'));
-		}
-		case 'Compact<u32>':
-		case 'Compact<u16>':
-		case 'Compact<u8>': {
-			let res;
-			let len;
-			if (input.data[0] % 4 == 0) {
-				// one byte
-				res = input.data[0] >> 2;
-				len = 1;
-			} else if (input.data[0] % 4 == 1) {
-				res = leToNumber(input.data.slice(0, 2)) >> 2;
-				len = 2;
-			} else if (input.data[0] % 4 == 2) {
-				res = leToNumber(input.data.slice(0, 4)) >> 2;
-				len = 4;
-			} else {
-				let n = (input.data[0] >> 2) + 4;
-				res = leToNumber(input.data.slice(1, n + 1));
-				len
+	let dataHex = bytesToHex(input.data.slice(0, 50));
+	console.log(deslicePrefix + 'des >>>', type, dataHex);
+	deslicePrefix +=  "   ";
+
+	let res;
+	let transform = transforms[type];
+	if (transform) {
+		if (typeof transform == 'string') {
+			res = deslice(input, transform);
+		} else if (typeof transform == 'object') {
+			if (transform instanceof Array) {
+				// just a tuple
+				res = new Tuple(...deslice(input, transform));
+			} else if (!transform._enum) {
+				// a struct
+				res = {};
+				Object.keys(transform).forEach(k => {
+					res[k] = deslice(input, transform[k]);
+				});
+			} else if (transform._enum instanceof Array) {
+				// simple enum
+				let n = input.data[0];
+				input.data = input.data.slice(1);
+				res = { option: transform._enum[n] };
+			} else if (transform._enum) {
+				// enum
+				let n = input.data[0];
+				input.data = input.data.slice(1);
+				let option = Object.keys(transform._enum)[n];
+				res = { option, value: deslice(input, transform._enum[option]) };
 			}
-			input.data = input.data.slice(len);
-			return res;
 		}
-		case 'u32':
-		case 'VoteIndex':
-		case 'PropIndex':
-		case 'ReferendumIndex': {
-			let res = leToNumber(input.data.slice(0, 4));
-			input.data = input.data.slice(4);
-			return res;
-		}
-		case 'bool': {
-			let res = !!input.data[0];
-			input.data = input.data.slice(1);
-			return res;
-		}
-		case 'KeyValue': {
-			return deslice(input, '(Vec<u8>, Vec<u8>)');
-		}
-		case 'Vec<bool>': {
-			let size = deslice(input, 'Compact<u32>');
-			let res = [...input.data.slice(0, size)].map(a => !!a);
-			input.data = input.data.slice(size);
-			return res;
-		}
-		case 'Vec<u8>': {
-			let size = deslice(input, 'Compact<u32>');
-			let res = input.data.slice(0, size);
-			input.data = input.data.slice(size);
-			return res;
-		}
-		default: {
-			let v = type.match(/^Vec<(.*)>$/);
-			if (v) {
-				let size = leToNumber(input.data.slice(0, 4));
+		res._type = type;
+	} else {
+		switch (type) {
+			case 'Call':
+			case 'Proposal': {
+				let c = Calls[input.data[0]];
+				res = type === 'Call' ? new Call : new Proposal;
+				res.module = c.name;
+				c = c[type == 'Call' ? 'calls' : 'priv_calls'][input.data[1]];
+				input.data = input.data.slice(2);
+				res.name = c.name;
+				res.params = c.params.map(p => ({ name: p.name, type: p.type, value: deslice(input, p.type) }));
+				break;
+			}
+			case 'AccountId': {
+				res = new AccountId(input.data.slice(0, 32));
+				input.data = input.data.slice(32);
+				break;
+			}
+			case 'Hash': {
+				res = new Hash(input.data.slice(0, 32));
+				input.data = input.data.slice(32);
+				break;
+			}
+			case 'Balance': {
+				res = leToNumber(input.data.slice(0, 16));
+				input.data = input.data.slice(16);
+				res = new Balance(res);
+				break;
+			}
+			case 'BlockNumber': {
+				res = leToNumber(input.data.slice(0, 8));
+				input.data = input.data.slice(8);
+				res = new BlockNumber(res);
+				break;
+			}
+			case 'Moment': {
+				let n = leToNumber(input.data.slice(0, 8));
+				input.data = input.data.slice(8);
+				res = new Moment(n);
+				break;
+			}
+			case 'VoteThreshold': {
+				const VOTE_THRESHOLD = ['SuperMajorityApprove', 'NotSuperMajorityAgainst', 'SimpleMajority'];
+				res = new VoteThreshold(VOTE_THRESHOLD[input.data[0]]);
+				input.data = input.data.slice(1);
+				break;
+			}
+			case 'SlashPreference': {
+				res = new SlashPreference(deslice(input, 'u32'));
+				break;
+			}
+			case 'Compact<u32>':
+			case 'Compact<u16>':
+			case 'Compact<u8>': {
+				let len;
+				if (input.data[0] % 4 == 0) {
+					// one byte
+					res = input.data[0] >> 2;
+					len = 1;
+				} else if (input.data[0] % 4 == 1) {
+					res = leToNumber(input.data.slice(0, 2)) >> 2;
+					len = 2;
+				} else if (input.data[0] % 4 == 2) {
+					res = leToNumber(inpuzt.data.slice(0, 4)) >> 2;
+					len = 4;
+				} else {
+					let n = (input.data[0] >> 2) + 4;
+					res = leToNumber(input.data.slice(1, n + 1));
+					len = 5 + n;
+				}
+				input.data = input.data.slice(len);
+				break;
+			}
+			case 'u16':
+				res = leToNumber(input.data.slice(0, 2));
+				input.data = input.data.slice(2);
+				break;
+			case 'u32':
+			case 'VoteIndex':
+			case 'PropIndex':
+			case 'ReferendumIndex': {
+				res = leToNumber(input.data.slice(0, 4));
 				input.data = input.data.slice(4);
-				return [...new Array(size)].map(() => deslice(input, v[1]));
+				break;
 			}
-			let t = type.match(/^\((.*)\)$/);
-			if (t) {
-				return new Tuple(...deslice(input, t[1].split(', ')));
+			case 'bool': {
+				res = !!input.data[0];
+				input.data = input.data.slice(1);
+				break;
 			}
-			throw 'Unknown type to deslice: ' + type;
+			case 'KeyValue': {
+				res = deslice(input, '(Vec<u8>, Vec<u8>)');
+				break;
+			}
+			case 'Vec<bool>': {
+				let size = deslice(input, 'Compact<u32>');
+				res = [...input.data.slice(0, size)].map(a => !!a);
+				input.data = input.data.slice(size);
+				break;
+			}
+			case 'Vec<u8>': {
+				let size = deslice(input, 'Compact<u32>');
+				res = input.data.slice(0, size);
+				input.data = input.data.slice(size);
+				break;
+			}
+			case 'String': {
+				let size = deslice(input, 'Compact<u32>');
+				res = input.data.slice(0, size);
+				input.data = input.data.slice(size);
+				res = new TextDecoder("utf-8").decode(res);
+				break;
+			}
+			case 'Type': {
+				res = deslice(input, 'String');
+				res = res.replace('T::', '');
+				res = res.match(/^Box<.*>$/) ? res.slice(4, -1) : res;
+				break;
+			}
+			default: {
+				let v = type.match(/^Vec<(.*)>$/);
+				if (v) {
+					let size = deslice(input, 'Compact<u32>');
+					res = [...new Array(size)].map(() => deslice(input, v[1]));
+					break;
+				}
+				let o = type.match(/^Option<(.*)>$/);
+				if (o) {
+					let some = deslice(input, 'bool');
+					if (some) {
+						res = deslice(input, o[1]);
+					} else {
+						res = null;
+					}
+					break;
+				}
+				let t = type.match(/^\((.*)\)$/);
+				if (t) {
+					res = new Tuple(...deslice(input, t[1].split(', ')));
+					break;
+				}
+				throw 'Unknown type to deslice: ' + type;
+			}
 		}
 	}
+	deslicePrefix = deslicePrefix.substr(3);
+	console.log(deslicePrefix + 'des <<<', type, res);
+	return res;
 }
 
 const numberWithCommas = n => {
@@ -440,7 +362,7 @@ function pretty(expr) {
 	return '' + expr;
 }
 
-function req(method, params = []) {
+function req(method, params = [], promiseProc = r => r.json().then(r => r.result || null)) {
 	try {
 		return fetch("http://127.0.0.1:9933/", {
 			method: 'POST',
@@ -452,7 +374,7 @@ function req(method, params = []) {
 				"params": params
 			}),
 			headers: new Headers({ 'Content-Type': 'application/json' })
-		}).then(r => r.json()).then(r => r.result || null);
+		}).then(promiseProc);
 	}
 	catch (e) {
 		return new Promise((resolve, reject) => resolve());
@@ -632,6 +554,12 @@ class Polkadot {
 				[head]
 			)).subscriptable();
 		}
+
+		this.sys = {
+			name: new TransformBond(() => req('system_name'), [], []),
+			version: new TransformBond(() => req('system_version'), [], []),
+			chain: new TransformBond(() => req('system_chain'), [], [])
+		};
 
 		this.system = {
 			index: storageMap('sys:non', r => r ? leToNumber(r) : 0)
@@ -873,12 +801,11 @@ if (typeof window !== 'undefined') {
 	window.storageValueKey = storageValueKey;
 	window.toLE = toLE;
 	window.leToNumber = leToNumber;
-	window.stringify = stringify;
 	window.pretty = pretty;
 	window.deslice = deslice;
 }
 
-module.exports = { ss58_decode, ss58_encode, Calls, pretty, req, balanceOf, indexOf,
+module.exports = { ss58_decode, ss58_encode, pretty, req, balanceOf, indexOf,
 	stringToSeed, stringToBytes, hexToBytes, bytesToHex, toLEHex, leHexToNumber, toLE,
 	leToNumber, Polkadot, reviver, AccountId, Hash, VoteThreshold, Moment, Balance,
 	BlockNumber, Tuple, Proposal, Call
