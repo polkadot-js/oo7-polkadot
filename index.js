@@ -297,6 +297,29 @@ function deslice(input, type) {
 		case 'SlashPreference': {
 			return new SlashPreference(deslice(input, 'u32'));
 		}
+		case 'Compact<u32>':
+		case 'Compact<u16>':
+		case 'Compact<u8>': {
+			let res;
+			let len;
+			if (input.data[0] % 4 == 0) {
+				// one byte
+				res = input.data[0] >> 2;
+				len = 1;
+			} else if (input.data[0] % 4 == 1) {
+				res = leToNumber(input.data.slice(0, 2)) >> 2;
+				len = 2;
+			} else if (input.data[0] % 4 == 2) {
+				res = leToNumber(input.data.slice(0, 4)) >> 2;
+				len = 4;
+			} else {
+				let n = (input.data[0] >> 2) + 4;
+				res = leToNumber(input.data.slice(1, n + 1));
+				len
+			}
+			input.data = input.data.slice(len);
+			return res;
+		}
 		case 'u32':
 		case 'VoteIndex':
 		case 'PropIndex':
@@ -314,15 +337,13 @@ function deslice(input, type) {
 			return deslice(input, '(Vec<u8>, Vec<u8>)');
 		}
 		case 'Vec<bool>': {
-			let size = leToNumber(input.data.slice(0, 4));
-			input.data = input.data.slice(4);
+			let size = deslice(input, 'Compact<u32>');
 			let res = [...input.data.slice(0, size)].map(a => !!a);
 			input.data = input.data.slice(size);
 			return res;
 		}
 		case 'Vec<u8>': {
-			let size = leToNumber(input.data.slice(0, 4));
-			input.data = input.data.slice(4);
+			let size = deslice(input, 'Compact<u32>');
 			let res = input.data.slice(0, size);
 			input.data = input.data.slice(size);
 			return res;
