@@ -366,9 +366,11 @@ class NodeService {
 			let d = JSON.parse(msg.data)
 			console.log("Message from node", d)
 			if (d.id) {
+				console.log("Reply.")
 				that.onreply[d.id](d)
 				delete that.onreply[d.id];
 			} else if (d.method && d.params && that.subscriptions[d.params.subscription]) {
+				console.log("Subscription. Callback: ", that.subscriptions[d.params.subscription])
 				that.subscriptions[d.params.subscription].callback(d.params.result, d.method)
 			}
 
@@ -644,6 +646,7 @@ function encoded(key, type) {
 
 class Polkadot {
 	initialiseFromMetadata(m) {
+		this.metadata = m
 		this.runtime = {}
 		m.modules.forEach(m => {
 			let o = {}
@@ -652,169 +655,124 @@ class Polkadot {
 				m.storage.items.forEach(item => {
 					switch (item.type.option) {
 						case 'Plain': {
-							o[item.name] = new StorageBond(`${prefix} ${item.name}`, item.type.value)
+							o[camel(item.name)] = new StorageBond(`${prefix} ${item.name}`, item.type.value)
 							break
 						}
 						case 'Map': {
 							let keyType = item.type.value.key
 							let valueType = item.type.value.value
-							o[item.name] = keyBond => new TransformBond(
+							o[camel(item.name)] = keyBond => new TransformBond(
 								key => new StorageBond(`${prefix} ${item.name}`, valueType, encoded(key, keyType)),
 								[keyBond]
 							).subscriptable()
 							break
 						}
 					}
-					o[snake(item.name)] = o[item.name]
-					o[camel(item.name)] = o[item.name]
 				})
 				this.runtime[m.prefix] = o
 			}
 		})
+		let that = this
+		m.modules.forEach(m => {
+			if (m.storage) {
+				let s = 'addExtra' + m.storage.prefix
+				if (that[s]) {
+					that[s]()
+				}
+			}
+		})
 	}
-	constructor () {
-		this.authorityCount = new SubscriptionBond('state_storage', [['0x' + bytesToHex(stringToBytes(':auth:len'))]], r => deslice(hexToBytes(r.changes[0][1]), 'u32'))
-		this.head = new SubscriptionBond('chain_newHead').subscriptable()
-		this.height = this.head.map(h => new BlockNumber(h.number))
-		this.metadata = service.request('state_getMetadata').then(blob => deslice(new Uint8Array(blob), 'RuntimeMetadata'))
-		let that = this;
-		this.metadata.then(m => that.initialiseFromMetadata(m))
 
-		this.header = hashBond => new TransformBond(hash => service.request('chain_getHeader', [hash]), [hashBond]).subscriptable();
-/*
-		this.storage = locBond => new TransformBond(loc => req('state_getStorage', ['0x' + toLEHex(XXH.h64(loc.buffer, 0), 8) + toLEHex(XXH.h64(loc.buffer, 1), 8)]), [locBond], [head]);
-		this.code = new TransformBond(() => req('state_getStorage', ['0x' + bytesToHex(stringToBytes(":code"))]).then(hexToBytes), [], [head]);
-		this.codeHash = new TransformBond(() => req('state_getStorageHash', ['0x' + bytesToHex(stringToBytes(":code"))]).then(hexToBytes), [], [head]);
-		this.codeSize = new TransformBond(() => req('state_getStorageSize', ['0x' + bytesToHex(stringToBytes(":code"))]), [], [head]);
-		function storageMap(prefix, formatResult = r => r, formatArg = x => x, postApply = x => x) {
-			let prefixBytes = stringToBytes(prefix);
-			return argBond => postApply((new TransformBond(
-				arg => {
-					let loc = new VecU8([...prefixBytes, ...formatArg(arg)]);
-					let k = '0x' + toLEHex(XXH.h64(loc.buffer, 0), 8) + toLEHex(XXH.h64(loc.buffer, 1), 8);
-					return req('state_getStorage', [k])
-						.then(r => formatResult(r && hexToBytes(r), arg));
-				},
-				[argBond],
-				[head]
-			)).subscriptable());
-		}
-		function storageValue(stringLocation, formatResult = r => r, formatLocation = storageValueKey) {
-			return (new TransformBond(
-				arg => {
-					return req('state_getStorage', [formatLocation(stringLocation)]).then(r => formatResult(r && hexToBytes(r), arg))
-				},
-				[],
-				[head]
-			)).subscriptable();
+	addExtraSession () {
+		let timestamp = this.runtime.timestamp
+		let session = this.runtime.session
+		if (session._extras) {
+			return
+		} else {
+			session._extras = true
 		}
 
-		this.sys = {
-			name: new TransformBond(() => req('system_name'), [], []),
-			version: new TransformBond(() => req('system_version'), [], []),
-			chain: new TransformBond(() => req('system_chain'), [], [])
-		};
-
-		this.system = {
-			index: storageMap('sys:non', r => r ? leToNumber(r) : 0)
-		};
-
-		this.consensus = {
-			authorityCount: new TransformBond(() => req('state_getStorage', ['0x' + bytesToHex(stringToBytes(":auth:len"))]).then(leHexToNumber), [], [head])
-		};
-
-		this.consensus.authorities = this.consensus.authorityCount.map(
-			n => [...Array(n)].map((_, i) => storageValue(
-				'0x' + bytesToHex(stringToBytes(":auth:")) + bytesToHex(toLE(i, 4)), 
-				r => r ? deslice(r, 'T::AccountId') : null,
-				x => x
-			)), 2);
-
-		this.timestamp = {
-			blockPeriod: storageValue('tim:block_period', r => deslice(r, 'T::Moment')),
-			now: storageValue('tim:val', r => deslice(r, 'T::Moment'))
-		}
-
-		this.session = {
-			validators: storageValue('ses:val', r => deslice(r, 'Vec<T::AccountId>')),
-			length: storageValue('ses:len', r => deslice(r, 'T::BlockNumber')),
-			currentIndex: storageValue('ses:ind', r => deslice(r, 'T::BlockNumber')),
-			currentStart: storageValue('ses:current_start', r => deslice(r, 'T::Moment')),
-			brokenPercentLate: storageValue('ses:broken_percent_late', r => deslice(r, 'u32')),
-			lastLengthChange: storageValue('ses:llc', r => r ? deslice(r, 'T::BlockNumber') : 0)
-		};
-		this.session.blocksRemaining = Bond					// 1..60
-			.all([this.height, this.session.lastLengthChange, this.session.length])
+		session.blocksRemaining = Bond					// 1..60
+			.all([this.height, session.lastLengthChange, session.sessionLength])
 			.map(([h, c, l]) => {
 				c = (c || 0);
 				return l - (h - c + l) % l;
 			});
-		this.session.lateness = Bond
+		session.lateness = Bond
 			.all([
-				this.timestamp.blockPeriod,
-				this.timestamp.now,
-				this.session.blocksRemaining,
-				this.session.length,
-				this.session.currentStart,
+				timestamp.blockPeriod,
+				timestamp.now,
+				session.blocksRemaining,
+				session.sessionLength,
+				session.currentStart,
 			]).map(([p, n, r, l, s]) => (n.number + p.number * r - s.number) / (p.number * l));
-		this.session.percentLate = this.session.lateness.map(l => Math.round(l * 100 - 100));
+		session.percentLate = session.lateness.map(l => Math.round(l * 100 - 100));
+	}
 
-		this.staking = {
-			freeBalance: storageMap('sta:bal:', r => r ? deslice(r, 'T::Balance') : new Balance(0)),
-			reservedBalance: storageMap('sta:lbo:', r => r ? deslice(r, 'T::Balance') : new Balance(0)),
-			currentEra: storageValue('sta:era', r => deslice(r, 'T::BlockNumber')),
-			sessionsPerEra: storageValue('sta:spe', r => deslice(r, 'T::BlockNumber')),
-			intentions: storageValue('sta:wil:', r => r ? deslice(r, 'Vec<AccountId>') : []),
-			lastEraLengthChange: storageValue('sta:lec', r => r ? deslice(r, 'T::BlockNumber') : new BlockNumber(0)),
-			validatorCount: storageValue('sta:vac', r => r ? deslice(r, 'u32') : 0),
-			nominatorsFor: storageMap('sta:nominators_for', r => r ? deslice(r, 'Vec<T::AccountId>') : []),
-			currentNominatorsFor: storageMap('sta:current_nominators_for', r => r ? deslice(r, 'Vec<T::AccountId>') : []),
-			earlyEraSlash: storageValue('sta:early_era_slash', r => r ? deslice(r, 'T::Balance') : new Balance(0)),
-			sessionReward: storageValue('sta:session_reward', r => r ? deslice(r, 'T::Balance') : new Balance(0)),
-			offlineSlashGrace: storageValue('sta:offline_slash_grace', r => r ? deslice(r, 'u32') : 0),
-			slashPreferenceOf: storageMap('sta:slash_preference_of', r => r ? deslice(r, 'SlashPreference') : new SlashPreference)
-		};
-		this.staking.thisSessionReward = Bond
-			.all([this.staking.sessionReward, this.session.lateness])
+	addExtraBalances() {
+		let balances = this.runtime.balances
+		if (balances._extras) {
+			return
+		} else {
+			balances._extras = true
+		}
+
+		balances.balance = who => Bond
+			.all([balances.freeBalance(who), balances.reservedBalance(who)])
+			.map(([f, r]) => new Balance(f + r));
+		balances.totalBalance = balances.balance;
+	}
+
+	addExtraStaking () {
+		this.addExtraSession()
+		this.addExtraBalances()
+		let session = this.runtime.session
+		let staking = this.runtime.staking
+		let balances = this.runtime.balances
+		if (staking._extras) {
+			return
+		} else {
+			staking._extras = true
+		}
+
+		staking.thisSessionReward = Bond
+			.all([staking.sessionReward, session.lateness])
 			.map(([r, l]) => Math.round(r / l));
-		this.staking.currentNominatedBalance = who => this.staking.currentNominatorsFor(who)
-			.map(ns => ns.map(n => this.staking.votingBalance(n)), 2)
+
+		staking.currentNominatedBalance = who => staking.currentNominatorsFor(who)
+			.map(ns => ns.map(n => balances.totalBalance(n)), 2)
 			.map(bs => new Balance(bs.reduce((a, b) => a + b, 0)))
-		this.staking.nominatedBalance = who => this.staking.nominatorsFor(who)
-			.map(ns => ns.map(n => this.staking.votingBalance(n)), 2)
+		staking.nominatedBalance = who => staking.nominatorsFor(who)
+			.map(ns => ns.map(n => balances.totalBalance(n)), 2)
 			.map(bs => new Balance(bs.reduce((a, b) => a + b, 0)))
-		this.staking.balance = who => Bond
-			.all([this.staking.freeBalance(who), this.staking.reservedBalance(who)])
+		staking.stakingBalance = who => Bond
+			.all([balances.totalBalance(who), staking.nominatedBalance(who)])
 			.map(([f, r]) => new Balance(f + r));
-		this.staking.votingBalance = this.staking.balance;
-		this.staking.stakingBalance = who => Bond
-			.all([this.staking.votingBalance(who), this.staking.nominatedBalance(who)])
-			.map(([f, r]) => new Balance(f + r));
-		this.staking.currentStakingBalance = who => Bond
-			.all([this.staking.votingBalance(who), this.staking.currentNominatedBalance(who)])
+		staking.currentStakingBalance = who => Bond
+			.all([balances.totalBalance(who), staking.currentNominatedBalance(who)])
 			.map(([f, r]) => new Balance(f + r));
 			
-		this.staking.eraLength = Bond
+		staking.eraLength = Bond
 			.all([
-				this.staking.sessionsPerEra,
-				this.session.length
+				staking.sessionsPerEra,
+				session.sessionLength
 			]).map(([a, b]) => a * b);
 		
-		this.staking.validators = this.session.validators
+		staking.validators = session.validators
 			.map(v => v.map(who => ({
 				who,
-				ownBalance: this.staking.votingBalance(who),
-				otherBalance: this.staking.currentNominatedBalance(who),
-				nominators: this.staking.currentNominatorsFor(who)
+				ownBalance: balances.totalBalance(who),
+				otherBalance: staking.currentNominatedBalance(who),
+				nominators: staking.currentNominatorsFor(who)
 			})), 2)
 			.map(v => v
 				.map(i => Object.assign({balance: i.ownBalance.add(i.otherBalance)}, i))
 				.sort((a, b) => b.balance - a.balance)
 			);
 
-		this.staking.nextThreeUp = this.staking.intentions.map(
-			l => ([this.session.validators, l.map(who => ({
-				who, ownBalance: this.staking.votingBalance(who), otherBalance: this.staking.nominatedBalance(who)
+		staking.nextThreeUp = staking.intentions.map(
+			l => ([session.validators, l.map(who => ({
+				who, ownBalance: balances.totalBalance(who), otherBalance: staking.nominatedBalance(who)
 			}) ) ]), 3
 		).map(([c, l]) => l
 			.map(i => Object.assign({balance: i.ownBalance.add(i.otherBalance)}, i))
@@ -823,42 +781,72 @@ class Polkadot {
 			.slice(0, 3)
 		);
 
-		this.staking.nextValidators = Bond
+		staking.nextValidators = Bond
 			.all([
-				this.staking.intentions.map(v => v.map(who => ({
+				staking.intentions.map(v => v.map(who => ({
 					who,
-					ownBalance: this.staking.votingBalance(who),
-					otherBalance: this.staking.nominatedBalance(who),
-					nominators: this.staking.nominatorsFor(who)
+					ownBalance: balances.totalBalance(who),
+					otherBalance: staking.nominatedBalance(who),
+					nominators: staking.nominatorsFor(who)
 				})), 2),
-				this.staking.validatorCount
+				staking.validatorCount
 			]).map(([as, vc]) => as
 				.map(i => Object.assign({balance: i.ownBalance.add(i.otherBalance)}, i))
 				.sort((a, b) => b.balance - a.balance)
 				.slice(0, vc)
 			);
-		this.staking.eraSessionsRemaining = Bond
+		staking.eraSessionsRemaining = Bond
 			.all([
-				this.staking.sessionsPerEra,
-				this.session.currentIndex,
-				this.staking.lastEraLengthChange
+				staking.sessionsPerEra,
+				session.currentIndex,
+				staking.lastEraLengthChange
 			]).map(([spe, si, lec]) => (spe - 1 - (si - lec) % spe));
-		this.staking.eraBlocksRemaining = Bond
+		staking.eraBlocksRemaining = Bond
 			.all([
-				this.session.length,
-				this.staking.eraSessionsRemaining,
-				this.session.blocksRemaining
+				session.sessionLength,
+				staking.eraSessionsRemaining,
+				session.blocksRemaining
 			]).map(([sl, sr, br]) => br + sl * sr);
+	}
+
+	constructor () {
+		let that = this;
 		
-		// TODO: if era ends early, we need to reset era length change...
-*//*		this.staking.currentSession = Bond
-			.all([this.session.currentIndex, this.session.length])
+		this.chain = {
+			head = new SubscriptionBond('chain_newHead').subscriptable()
+		}
+		this.chain.height = this.chain.head.map(h => new BlockNumber(h.number))
+		this.chain.header = hashBond => new TransformBond(hash => service.request('chain_getHeader', [hash]), [hashBond]).subscriptable();
+		
+		this.system = {
+			name: new TransformBond(() => service.request('system_name')).subscriptable(),
+			version: new TransformBond(() => service.request('system_version')).subscriptable(),
+			chain: new TransformBond(() => service.request('system_chain')).subscriptable()
+		}
+		this.state = {
+			authorityCount: new SubscriptionBond('state_storage', [['0x' + bytesToHex(stringToBytes(':auth:len'))]], r => deslice(hexToBytes(r.changes[0][1]), 'u32')),
+			code: new SubscriptionBond('state_storage', [['0x' + bytesToHex(stringToBytes(':code'))]], r => hexToBytes(r.changes[0][1])),
+			codeHash: new TransformBond(() => service.request('state_getStorageHash', ['0x' + bytesToHex(stringToBytes(":code"))]).then(hexToBytes), [], [this.chain.head]),
+			codeSize: new TransformBond(() => service.request('state_getStorageSize', ['0x' + bytesToHex(stringToBytes(":code"))]), [], [this.chain.head])
+		}
+		this.state.authorities = this.state.authorityCount.map(
+			n => [...Array(n)].map((_, i) =>
+				new SubscriptionBond('state_storage',
+					[[ '0x' + bytesToHex(stringToBytes(":auth:")) + bytesToHex(toLE(i, 4)) ]],
+					r => deslice(hexToBytes(r.changes[0][1]), 'AccountId')
+				)
+			), 2);
+
+		service.request('state_getMetadata').then(blob => deslice(new Uint8Array(blob), 'RuntimeMetadata'))
+			.then(m => that.initialiseFromMetadata(m))
+
+/*		staking.currentSession = Bond
+			.all([this.session.currentIndex, this.session.sessionLength])
 			.map(([r, i, l]) =>
 				r + 
 			);
-*//*			
-
-		{
+*/
+/*		{
 			let referendumCount = storageValue('dem:rco', r => r ? leToNumber(r) : 0);
 			let nextTally = storageValue('dem:nxt', r => r ? leToNumber(r) : 0);
 			let referendumVoters = storageMap('dem:vtr:', r => r ? deslice(r, 'Vec<AccountId>') : [], i => toLE(i, 4));
@@ -872,7 +860,7 @@ class Polkadot {
 					.map(r => r || [])
 					.mapEach(v => Bond.all([
 						referendumVoteOf([x.index, v]),
-						this.staking.balance(v)
+						balances.balance(v)
 					]))
 					.map(tallyAmounts)
 				}, x), 1));
@@ -939,7 +927,8 @@ class Polkadot {
 			window.polkadot = this;
 			window.storageMap = storageMap;
 			window.storageValue = storageValue;
-		}*/
+		}
+*/
 	}
 }
 
