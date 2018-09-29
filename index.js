@@ -2,26 +2,6 @@ const {Bond, TimeBond, TransformBond} = require('oo7');
 const XXH = require('xxhashjs');
 const {ss58_decode, ss58_encode} = require('ss58');
 require('isomorphic-fetch');
-/*
-function interpretRustCalls(s) {
-	var r = {};
-	s.split('\n')
-		.map(s => s.trim())
-		.filter(s => !s.startsWith('//') && !s.length == 0)
-		.map(s => s.match(/fn ([a-z_]*)\((aux,? ?)?(.*)\) = ([0-9]+);/))
-		.map(([_0, name, _2, p, index], i) => {
-			let params = p.length == 0 ? [] : p.split(',').map(p => {
-				let m = p.match(/([a-z_]*): *([A-Za-z][A-Za-z<>:0-9]+)/);
-				let name = m[1];
-				var type = m[2].replace('T::', '');
-				type = type.match(/^Box<.*>$/) ? type.slice(4, -1) : type;
-				return { name, type };
-			});
-			r[index] = { name, params };
-		});
-	return r;
-}
-*/
 
 class VecU8 extends Uint8Array { toJSON() { return { _type: 'VecU8', data: Array.from(this) } }}
 class AccountId extends Uint8Array { toJSON() { return { _type: 'AccountId', data: Array.from(this) } }}
@@ -362,25 +342,142 @@ function pretty(expr) {
 	return '' + expr;
 }
 
-function req(method, params = [], promiseProc = r => r.json().then(r => r.result || null)) {
-	try {
-		return fetch("http://127.0.0.1:9933/", {
-			method: 'POST',
-			mode: 'cors',
-			body: JSON.stringify({
-				"jsonrpc": "2.0",
-				"id": "1",
-				"method": method,
-				"params": params
-			}),
-			headers: new Headers({ 'Content-Type': 'application/json' })
-		}).then(promiseProc);
+/*export class SubscriptionBond extends Bond {
+
+}*/
+
+class NodeService {
+	constructor() {
+		this.subscriptions = {}
+		this.onreply = {}
+		this.index = 1
+		this.start()
 	}
-	catch (e) {
-		return new Promise((resolve, reject) => resolve());
+	start () {
+		let uri = 'ws://127.0.0.1:9944';
+		this.ws = new WebSocket(uri)
+		this.ws.onopen = function () {}
+		let that = this;
+		this.ws.onmessage = function (msg) {
+			let d = JSON.parse(msg.data)
+			console.log("Message from node", d)
+			if (d.id) {
+				that.onreply[d.id](d)
+				delete that.onreply[d.id];
+			} else if (d.method && d.params && that.subscriptions[d.params.subscription]) {
+				that.subscriptions[d.params.subscription].callback(d.params.result, d.method)
+			}
+
+			if (that.reconnect) {
+				window.clearTimeout(that.reconnect)
+			}
+			// epect a message every 10 seconds or we reconnect.
+			if (false) 
+				that.reconnect = window.setTimeout(() => {
+				that.ws.close()
+				delete that.ws
+				that.start()
+			}, 10000)
+		}
+	}
+	request (method, params = []) {
+		let id = '' + this.index++;
+		this.ws.send(JSON.stringify({
+			"jsonrpc": "2.0",
+			"id": id,
+			"method": method,
+			"params": params
+		}))
+
+		let that = this
+		return new Promise((resolve, reject) => {
+			that.onreply[id] = msg => {
+				if (msg.error) {
+					reject(msg.error)
+				} else {
+					resolve(msg.result)
+				}
+			}
+		})
+	}
+	subscribe (method, params, callback) {
+		if (method.indexOf('_subscribe') == -1 && method.indexOf('_') != -1) {
+			method = method.replace(/_\w/, c => '_subscribe' + c[1].toUpperCase())
+		}
+		let that = this
+		return this.request(method, params).then(id => {
+			that.subscriptions[id] = { callback, method }
+			return id
+		})
+	}
+	unsubscribe (id) {
+		let that = this
+		if (!this.subscriptions[id]) {
+			throw 'Invalid subscription index'
+		}
+		let method = this.subscriptions[id].method.replace('_subscribe', '_unsubscribe')
+
+		return this.request(method, [id]).then(result => {
+			delete that.subscriptions[id]
+			return result
+		})
+	}
+	finalise () {
+		delete this.ws;
 	}
 }
 
+let service = new NodeService;
+
+class SubscriptionBond extends Bond {
+	constructor (name, params = [], xform = null, cache = { id: null, stringify: JSON.stringify, parse: JSON.parse }, mayBeNull) {
+		super(mayBeNull, cache);
+		this.name = name;
+		this.params = params;
+		this.xform = xform;
+	}
+	initialise () {
+		let that = this;
+		let callback = result => {
+			if (that.xform) {
+				result = that.xform(result);
+			}
+			that.trigger(result);
+		};
+		// promise instead of id because if a dependency triggers finalise() before id's promise is resolved the unsubscribing would call with undefined
+		this.subscription = service.subscribe(this.name, this.params, callback);
+	}
+	finalise () {
+		this.subscription.then(id => {
+			service.unsubscribe(id);
+		});
+	}
+	map (f, outResolveDepth = 0, cache = undefined) {
+			return new TransformBond(f, [this], [], outResolveDepth, 1, cache);
+	}
+	sub (name, outResolveDepth = 0, cache = undefined) {
+			return new TransformBond((r, n) => r[n], [this, name], [], outResolveDepth, 1, cache);
+	}
+	static all(list, cache = undefined) {
+			return new TransformBond((...args) => args, list, [], 0, 1, cache);
+	}
+}
+
+function storageValueKey(stringLocation) {
+	let loc = stringToBytes(stringLocation);
+	return '0x' + toLEHex(XXH.h64(loc.buffer, 0), 8) + toLEHex(XXH.h64(loc.buffer, 1), 8);
+}
+function storageMapKey(prefixString, arg) {
+	let loc = new VecU8([...stringToBytes(prefixString), ...arg]);
+	return '0x' + toLEHex(XXH.h64(loc.buffer, 0), 8) + toLEHex(XXH.h64(loc.buffer, 1), 8);
+}
+
+class StorageBond extends SubscriptionBond {
+	constructor (prefix, type, args = []) {
+		super('state_storage', [[ storageMapKey(prefix, args) ]], r => deslice(r.changes[0][1], type))
+	}
+}
+/*
 function balanceOf(pubkey) {
 	let loc = new Uint8Array([...stringToBytes('sta:bal:'), ...hexToBytes(pubkey)]);
 	return req('state_getStorage', ['0x' + toLEHex(XXH.h64(loc.buffer, 0), 8) + toLEHex(XXH.h64(loc.buffer, 1), 8)])
@@ -392,7 +489,7 @@ function indexOf(pubkey) {
 	return req('state_getStorage', ['0x' + toLEHex(XXH.h64(loc.buffer, 0), 8) + toLEHex(XXH.h64(loc.buffer, 1), 8)])
 		.then(r => r ? leHexToNumber(r.substr(2)) : 0);
 }
-
+*/
 function stringToSeed(s) {
 	var data = new VecU8(32);
 	data.fill(32);
@@ -513,21 +610,14 @@ function tallyAmounts(x) {
 	return {aye: r[1], nay: r[0]};
 }
 
-function storageValueKey(stringLocation) {
-	let loc = stringToBytes(stringLocation);
-	return '0x' + toLEHex(XXH.h64(loc.buffer, 0), 8) + toLEHex(XXH.h64(loc.buffer, 1), 8);
-}
-function storageMapKey(prefixString, arg) {
-	let loc = new VecU8([...stringToBytes(prefixString), ...arg]);
-	return '0x' + toLEHex(XXH.h64(loc.buffer, 0), 8) + toLEHex(XXH.h64(loc.buffer, 1), 8);
-}
-
 class Polkadot {
 	constructor () {
-		let head = new TransformBond(() => req('chain_getHead'), [], [new TimeBond])
-		this.head = head;
-		this.header = hashBond => new TransformBond(hash => req('chain_getHeader', [hash]), [hashBond], [new TimeBond]).subscriptable();
-		this.height = this.header(this.head).map(h => new BlockNumber(h.number));
+		this.authorityCount = new SubscriptionBond('state_storage', [['0x' + bytesToHex(stringToBytes(':auth:len'))]], r => deslice(r.changes[0][1], 'u32'))
+		this.head = new SubscriptionBond('chain_newHead').subscriptable()
+		this.height = this.head.map(h => new BlockNumber(h.number));
+		
+		this.header = hashBond => new TransformBond(hash => service.request('chain_getHeader', [hash]), [hashBond]).subscriptable();
+/*
 		this.storage = locBond => new TransformBond(loc => req('state_getStorage', ['0x' + toLEHex(XXH.h64(loc.buffer, 0), 8) + toLEHex(XXH.h64(loc.buffer, 1), 8)]), [locBond], [head]);
 		this.code = new TransformBond(() => req('state_getStorage', ['0x' + bytesToHex(stringToBytes(":code"))]).then(hexToBytes), [], [head]);
 		this.codeHash = new TransformBond(() => req('state_getStorageHash', ['0x' + bytesToHex(stringToBytes(":code"))]).then(hexToBytes), [], [head]);
@@ -697,12 +787,12 @@ class Polkadot {
 			]).map(([sl, sr, br]) => br + sl * sr);
 		
 		// TODO: if era ends early, we need to reset era length change...
-/*		this.staking.currentSession = Bond
+*//*		this.staking.currentSession = Bond
 			.all([this.session.currentIndex, this.session.length])
 			.map(([r, i, l]) =>
 				r + 
 			);
-*/			
+*//*			
 
 		{
 			let referendumCount = storageValue('dem:rco', r => r ? leToNumber(r) : 0);
@@ -785,28 +875,29 @@ class Polkadot {
 			window.polkadot = this;
 			window.storageMap = storageMap;
 			window.storageValue = storageValue;
-		}
+		}*/
 	}
 }
 
 if (typeof window !== 'undefined') {
-	window.req = req;
 	window.ss58_encode = ss58_encode;
 	window.ss58_decode = ss58_decode;
 	window.bytesToHex = bytesToHex;
 	window.stringToBytes = stringToBytes;
 	window.hexToBytes = hexToBytes;
-	window.that = this;
-	window.storageMapKey = storageMapKey;
-	window.storageValueKey = storageValueKey;
 	window.toLE = toLE;
 	window.leToNumber = leToNumber;
+	window.storageMapKey = storageMapKey;
+	window.storageValueKey = storageValueKey;
 	window.pretty = pretty;
 	window.deslice = deslice;
+	window.service = service;
+	window.SubscriptionBond = SubscriptionBond;
+	window.StorageBond = StorageBond;
 }
 
-module.exports = { ss58_decode, ss58_encode, pretty, req, balanceOf, indexOf,
-	stringToSeed, stringToBytes, hexToBytes, bytesToHex, toLEHex, leHexToNumber, toLE,
+module.exports = { ss58_decode, ss58_encode, pretty, stringToSeed, stringToBytes,
+	hexToBytes, bytesToHex, toLEHex, leHexToNumber, toLE,
 	leToNumber, Polkadot, reviver, AccountId, Hash, VoteThreshold, Moment, Balance,
 	BlockNumber, Tuple, Proposal, Call
 }
