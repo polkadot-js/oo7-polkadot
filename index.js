@@ -1,6 +1,8 @@
 const {Bond, TimeBond, TransformBond} = require('oo7');
 const XXH = require('xxhashjs');
 const {ss58_decode, ss58_encode} = require('ss58');
+const {camel, snake} = require('change-case');
+
 require('isomorphic-fetch');
 
 class VecU8 extends Uint8Array { toJSON() { return { _type: 'VecU8', data: Array.from(this) } }}
@@ -61,14 +63,14 @@ let transforms = {
 	StorageFunctionModifier: { _enum: [ 'None', 'Default', 'Required' ] },
 	StorageFunctionTypeMap: { key: 'Type', value: 'Type' },
 	StorageFunctionType: { _enum: { Plain: 'Type', Map: 'StorageFunctionTypeMap' } },
-	StorageFunctionMetadata: { name: 'String', modifier: 'StorageFunctionModifier', ty: 'StorageFunctionType', documentation: 'Vec<String>' },
-	StorageMetadata: { prefix: 'String', functions: 'Vec<StorageFunctionMetadata>' },
+	StorageFunctionMetadata: { name: 'String', modifier: 'StorageFunctionModifier', type: 'StorageFunctionType', documentation: 'Vec<String>' },
+	StorageMetadata: { prefix: 'String', items: 'Vec<StorageFunctionMetadata>' },
 	EventMetadata: { name: 'String', arguments: 'Vec<Type>', documentation: 'Vec<String>' },
 	OuterEventMetadata: { name: 'String', events: 'Vec<(String, Vec<EventMetadata>)>' },
 	ModuleMetadata: { name: 'String', call: 'CallMetadata' },
 	CallMetadata: { name: 'String', functions: 'Vec<FunctionMetadata>' },
 	FunctionMetadata: { id: 'u16', name: 'String', arguments: 'Vec<FunctionArgumentMetadata>', documentation: 'Vec<String>' },
-	FunctionArgumentMetadata: { name: 'String', ty: 'Type' }
+	FunctionArgumentMetadata: { name: 'String', type: 'Type' }
 };
 
 var deslicePrefix = 0;
@@ -84,8 +86,8 @@ function deslice(input, type) {
 		type = type.slice(3);
 	}
 	let dataHex = bytesToHex(input.data.slice(0, 50));
-	console.log(deslicePrefix + 'des >>>', type, dataHex);
-	deslicePrefix +=  "   ";
+//	console.log(deslicePrefix + 'des >>>', type, dataHex);
+//	deslicePrefix +=  "   ";
 
 	let res;
 	let transform = transforms[type];
@@ -261,8 +263,8 @@ function deslice(input, type) {
 			}
 		}
 	}
-	deslicePrefix = deslicePrefix.substr(3);
-	console.log(deslicePrefix + 'des <<<', type, res);
+//	deslicePrefix = deslicePrefix.substr(3);
+//	console.log(deslicePrefix + 'des <<<', type, res);
 	return res;
 }
 
@@ -342,22 +344,24 @@ function pretty(expr) {
 	return '' + expr;
 }
 
-/*export class SubscriptionBond extends Bond {
-
-}*/
-
 class NodeService {
 	constructor() {
 		this.subscriptions = {}
 		this.onreply = {}
+		this.onceOpen = []
 		this.index = 1
 		this.start()
 	}
 	start () {
 		let uri = 'ws://127.0.0.1:9944';
-		this.ws = new WebSocket(uri)
-		this.ws.onopen = function () {}
 		let that = this;
+		this.ws = new WebSocket(uri)
+		this.ws.onopen = function () {
+			console.log('Connection open!')
+			let onceOpen = that.onceOpen;
+			that.onceOpen = []
+			window.setTimeout(() => onceOpen.forEach(f => f()), 0)
+		}
 		this.ws.onmessage = function (msg) {
 			let d = JSON.parse(msg.data)
 			console.log("Message from node", d)
@@ -381,16 +385,17 @@ class NodeService {
 		}
 	}
 	request (method, params = []) {
-		let id = '' + this.index++;
-		this.ws.send(JSON.stringify({
-			"jsonrpc": "2.0",
-			"id": id,
-			"method": method,
-			"params": params
-		}))
-
 		let that = this
-		return new Promise((resolve, reject) => {
+		let doSend = () => new Promise((resolve, reject) => {
+			console.log('Attempting send', that.ws.readyState)
+			let id = '' + this.index++;
+			that.ws.send(JSON.stringify({
+				"jsonrpc": "2.0",
+				"id": id,
+				"method": method,
+				"params": params
+			}))
+	
 			that.onreply[id] = msg => {
 				if (msg.error) {
 					reject(msg.error)
@@ -399,6 +404,19 @@ class NodeService {
 				}
 			}
 		})
+
+		if (this.ws.readyState == 0) {
+			// still connecting
+			return new Promise(resolve => {
+				that.onceOpen.push(() => {
+					console.log("Opened: sending")
+					let res = doSend()
+					resolve(res)
+				})
+			})
+		} else {
+			return doSend()
+		}
 	}
 	subscribe (method, params, callback) {
 		if (method.indexOf('_subscribe') == -1 && method.indexOf('_') != -1) {
@@ -474,7 +492,7 @@ function storageMapKey(prefixString, arg) {
 
 class StorageBond extends SubscriptionBond {
 	constructor (prefix, type, args = []) {
-		super('state_storage', [[ storageMapKey(prefix, args) ]], r => deslice(r.changes[0][1], type))
+		super('state_storage', [[ storageMapKey(prefix, args) ]], r => deslice(hexToBytes(r.changes[0][1]), type))
 	}
 }
 /*
@@ -610,12 +628,58 @@ function tallyAmounts(x) {
 	return {aye: r[1], nay: r[0]};
 }
 
+function encoded(key, type) {
+	if (typeof key == 'object' && key instanceof Uint8Array) {
+		return key
+	}
+	if (typeof key == 'string' && key.startsWith('0x')) {
+		return hexToBytes(key)
+	}
+
+	// other type-specific transforms
+	if (type == 'AccountId' && typeof key == 'string') {
+		return ss58_decode(key);
+	}
+}
+
 class Polkadot {
+	initialiseFromMetadata(m) {
+		this.runtime = {}
+		m.modules.forEach(m => {
+			let o = {}
+			if (m.storage) {
+				let prefix = m.storage.prefix
+				m.storage.items.forEach(item => {
+					switch (item.type.option) {
+						case 'Plain': {
+							o[item.name] = new StorageBond(`${prefix} ${item.name}`, item.type.value)
+							break
+						}
+						case 'Map': {
+							let keyType = item.type.value.key
+							let valueType = item.type.value.value
+							o[item.name] = keyBond => new TransformBond(
+								key => new StorageBond(`${prefix} ${item.name}`, valueType, encoded(key, keyType)),
+								[keyBond]
+							).subscriptable()
+							break
+						}
+					}
+					o[snake(item.name)] = o[item.name]
+					o[camel(item.name)] = o[item.name]
+				})
+				this.runtime[m.prefix] = o
+			}
+		})
+	}
 	constructor () {
-		this.authorityCount = new SubscriptionBond('state_storage', [['0x' + bytesToHex(stringToBytes(':auth:len'))]], r => deslice(r.changes[0][1], 'u32'))
+		this.authorityCount = new SubscriptionBond('state_storage', [['0x' + bytesToHex(stringToBytes(':auth:len'))]], r => deslice(hexToBytes(r.changes[0][1]), 'u32'))
 		this.head = new SubscriptionBond('chain_newHead').subscriptable()
-		this.height = this.head.map(h => new BlockNumber(h.number));
-		
+		this.height = this.head.map(h => new BlockNumber(h.number))
+		this.metadata = service.request('state_getMetadata').then(blob => deslice(new Uint8Array(blob), 'RuntimeMetadata'))
+		let that = this;
+		this.metadata.then(m => that.initialiseFromMetadata(m))
+
 		this.header = hashBond => new TransformBond(hash => service.request('chain_getHeader', [hash]), [hashBond]).subscriptable();
 /*
 		this.storage = locBond => new TransformBond(loc => req('state_getStorage', ['0x' + toLEHex(XXH.h64(loc.buffer, 0), 8) + toLEHex(XXH.h64(loc.buffer, 1), 8)]), [locBond], [head]);

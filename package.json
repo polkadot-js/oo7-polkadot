@@ -23,6 +23,7 @@
   },
   "homepage": "https://github.com/polkadot-js/oo7-polkadot#readme",
   "dependencies": {
+    "change-case": "^3.0.2",
     "isomorphic-fetch": "^2.2.1",
     "oo7": "^0.5.9",
     "ss58": "^1.0.2",
