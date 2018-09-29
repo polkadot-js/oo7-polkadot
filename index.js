@@ -344,6 +344,24 @@ function pretty(expr) {
 	return '' + expr;
 }
 
+const subscriptionKey = {
+	author_submitAndWatchExtrinsic: {
+		notification: 'author_extrinsicUpdate',
+		subscribe: 'author_submitAndWatchExtrinsic',
+		unsubscribe: 'author_unwatchExtrinsic'
+	},
+	state_storage: {
+		notification: 'state_storage',
+		subscribe: 'state_subscribeStorage',
+		unsubscribe: 'state_unsubscribeStorage'
+	},
+	chain_newHead: {
+		notification: 'chain_newHead',
+		subscribe: 'chain_subscribeNewHead',
+		unsubscribe: 'chain_unsubscribeNewHead'
+	}
+}
+
 class NodeService {
 	constructor() {
 		this.subscriptions = {}
@@ -418,25 +436,26 @@ class NodeService {
 			return doSend()
 		}
 	}
-	subscribe (method, params, callback) {
+	subscribe (what, params, callback) {
 		let that = this
-		let subscribeMethod = method.replace(/_\w/, c => '_subscribe' + c[1].toUpperCase())
-		return this.request(subscribeMethod, params).then(id => {
-			that.subscriptions[method] = that.subscriptions[method] || {}
-			that.subscriptions[method][id] = callback
-			return { method, id }
+		return this.request(subscriptionKey[what].subscribe, params).then(id => {
+			let notification = subscriptionKey[what].notification;
+			that.subscriptions[notification] = that.subscriptions[notification] || {}
+			that.subscriptions[notification][id] = callback
+			return { what, id }
 		})
 	}
-	unsubscribe ({method, id}) {
+	unsubscribe ({what, id}) {
 		let that = this
-		let unsubscribeMethod = method.replace(/_\w/, c => '_unsubscribe' + c[1].toUpperCase())
 
-		if (!(this.subscriptions[method] && this.subscriptions[method][id])) {
+		let notification = subscriptionKey[what].notification;
+		if (!(this.subscriptions[notification] && this.subscriptions[notification][id])) {
 			throw 'Invalid subscription id'
 		}
+		let unsubscribe = subscriptionKey[what].unsubscribe
 
-		return this.request(unsubscribeMethod, [id]).then(result => {
-			delete that.subscriptions[method][id]
+		return this.request(unsubscribe, [id]).then(result => {
+			delete that.subscriptions[notification][id]
 			return result
 		})
 	}
@@ -480,6 +499,12 @@ class SubscriptionBond extends Bond {
 			return new TransformBond((...args) => args, list, [], 0, 1, cache);
 	}
 }
+
+/*class TransactionBond extends SubscriptionBond {
+	constructor (data) {
+		super()
+	}
+}*/
 
 function storageValueKey(stringLocation) {
 	let loc = stringToBytes(stringLocation);
