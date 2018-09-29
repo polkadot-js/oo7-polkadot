@@ -497,19 +497,7 @@ class StorageBond extends SubscriptionBond {
 		super('state_storage', [[ storageMapKey(prefix, args) ]], r => deslice(hexToBytes(r.changes[0][1]), type))
 	}
 }
-/*
-function balanceOf(pubkey) {
-	let loc = new Uint8Array([...stringToBytes('sta:bal:'), ...hexToBytes(pubkey)]);
-	return req('state_getStorage', ['0x' + toLEHex(XXH.h64(loc.buffer, 0), 8) + toLEHex(XXH.h64(loc.buffer, 1), 8)])
-		.then(r => r ? leHexToNumber(r.substr(2)) : 0);
-}
 
-function indexOf(pubkey) {
-	let loc = new Uint8Array([...stringToBytes('sys:non'), ...hexToBytes(pubkey)]);
-	return req('state_getStorage', ['0x' + toLEHex(XXH.h64(loc.buffer, 0), 8) + toLEHex(XXH.h64(loc.buffer, 1), 8)])
-		.then(r => r ? leHexToNumber(r.substr(2)) : 0);
-}
-*/
 function stringToSeed(s) {
 	var data = new VecU8(32);
 	data.fill(32);
@@ -642,6 +630,23 @@ function encoded(key, type) {
 	if (type == 'AccountId' && typeof key == 'string') {
 		return ss58_decode(key);
 	}
+
+	if (typeof type == 'string' && type.match(/\(.*\)/)) {
+		return encoded(key, type.substr(1, type.length - 2).split(','))
+	}
+
+	// if an array then just concat
+	if (key instanceof Array && type instanceof Array) {
+		let x = key.map((i, index) => encoded(i, type[index]));
+		let res = new Uint8Array();
+		x.forEach(x => {
+			r = new Uint8Array(res.length + x.length);
+			r.set(res)
+			r.set(x, res.length)
+			res = r
+		})
+		return res
+	}
 }
 
 class Polkadot {
@@ -721,6 +726,37 @@ class Polkadot {
 			.all([balances.freeBalance(who), balances.reservedBalance(who)])
 			.map(([f, r]) => new Balance(f + r));
 		balances.totalBalance = balances.balance;
+	}
+
+	addExtraDemocracy () {
+		let democracy = this.runtime.democracy
+		if (democracy._extras) {
+			return
+		} else {
+			democracy._extras = true
+		}
+/*	//TODO
+		let referendumInfoOf = storageMap('dem:pro:', (r, index) => {
+			if (r == null) return null;
+			let [ends, proposal, voteThreshold] = deslice(r, ['BlockNumber', 'Proposal', 'VoteThreshold']);
+			return { index, ends, proposal, voteThreshold };
+		}, i => toLE(i, 4), x => x.map(x =>
+			Object.assign({votes: democracy.votersFor(x.index)
+				.map(r => r || [])
+				.mapEach(v => Bond.all([
+					democracy.voteOf([x.index, v]),
+					balances.balance(v)
+				]))
+				.map(tallyAmounts)
+			}, x), 1));
+
+		this.democracy = {
+			proposed: storageValue('dem:pub', r => r ? deslice(r, 'Vec<(PropIndex, Proposal, AccountId)>') : []).map(is => is.map(i => {
+				let d = depositOf(i[0]);
+				return { index: i[0], proposal: i[1], proposer: i[2], sponsors: d.map(v => v ? v.sponsors : null), bond: d.map(v => v ? v.bond : null) };
+			}), 2),
+			active: Bond.all([nextTally, referendumCount]).map(([f, t]) => [...Array(t - f)].map((_, i) => referendumInfoOf(f + i)), 1),
+		};*/
 	}
 
 	addExtraStaking () {
@@ -839,96 +875,6 @@ class Polkadot {
 
 		service.request('state_getMetadata').then(blob => deslice(new Uint8Array(blob), 'RuntimeMetadata'))
 			.then(m => that.initialiseFromMetadata(m))
-
-/*		staking.currentSession = Bond
-			.all([this.session.currentIndex, this.session.sessionLength])
-			.map(([r, i, l]) =>
-				r + 
-			);
-*/
-/*		{
-			let referendumCount = storageValue('dem:rco', r => r ? leToNumber(r) : 0);
-			let nextTally = storageValue('dem:nxt', r => r ? leToNumber(r) : 0);
-			let referendumVoters = storageMap('dem:vtr:', r => r ? deslice(r, 'Vec<AccountId>') : [], i => toLE(i, 4));
-			let referendumVoteOf = storageMap('dem:vot:', r => r && !!r[0], i => new VecU8([...toLE(i[0], 4), ...i[1]]));
-			let referendumInfoOf = storageMap('dem:pro:', (r, index) => {
-				if (r == null) return null;
-				let [ends, proposal, voteThreshold] = deslice(r, ['BlockNumber', 'Proposal', 'VoteThreshold']);
-				return { index, ends, proposal, voteThreshold };
-			}, i => toLE(i, 4), x => x.map(x =>
-				Object.assign({votes: referendumVoters(x.index)
-					.map(r => r || [])
-					.mapEach(v => Bond.all([
-						referendumVoteOf([x.index, v]),
-						balances.balance(v)
-					]))
-					.map(tallyAmounts)
-				}, x), 1));
-			let depositOf = storageMap('dem:dep:', r => {
-				if (r) {
-					let i = deslice(r, '(T::Balance, Vec<T::AccountId>)');
-					return { bond: i[0], sponsors: i[1] };
-				} else {
-					return null;
-				}
-			}, i => toLE(i, 4));
-
-			this.democracy = {
-				proposed: storageValue('dem:pub', r => r ? deslice(r, 'Vec<(PropIndex, Proposal, AccountId)>') : []).map(is => is.map(i => {
-					let d = depositOf(i[0]);
-					return { index: i[0], proposal: i[1], proposer: i[2], sponsors: d.map(v => v ? v.sponsors : null), bond: d.map(v => v ? v.bond : null) };
-				}), 2),
-				active: Bond.all([nextTally, referendumCount]).map(([f, t]) => [...Array(t - f)].map((_, i) => referendumInfoOf(f + i)), 1),
-				launchPeriod: storageValue('dem:lau', r => deslice(r, 'T::BlockNumber')),
-				minimumDeposit: storageValue('dem:min', r => deslice(r, 'T::Balance')),
-				votingPeriod: storageValue('dem:per', r => deslice(r, 'T::BlockNumber')),
-				depositOf
-			};
-		}
-
-		{
-			let candidates = storageValue('cou:vrs', r => r ? deslice(r, 'Vec<T::AccountId>') : []);
-			let registerInfoOf = storageMap('cou:reg', r => { let i = deslice(r, '(VoteIndex, u32)'); return { since: i[0], slot: i[1] }; });
-			this.council = {
-				candidacyBond: storageValue('cou:cbo', r => deslice(r, 'T::Balance')),
-				votingBond: storageValue('cou:vbo', r => deslice(r, 'T::Balance')),
-				presentSlashPerVoter: storageValue('cou:pss', r => deslice(r, 'T::Balance')),
-				carryCount: storageValue('cou:cco', r => deslice(r, 'u32')),
-				presentationDuration: storageValue('cou:pdu', r => deslice(r, 'T::BlockNumber')),
-				inactiveGracePeriod: storageValue('cou:vgp', r => deslice(r, 'VoteIndex')),
-				votingPeriod: storageValue('cou:per', r => deslice(r, 'T::BlockNumber')),
-				termDuration: storageValue('cou:trm', r => deslice(r, 'T::BlockNumber')),
-				desiredSeats: storageValue('cou:sts', r => deslice(r, 'u32')),
-				voteCount: storageValue('cou:vco', r => r ? deslice(r, 'VoteIndex') : 0),
-				active: storageValue('cou:act', r => r ? deslice(r, 'Vec<(T::AccountId, T::BlockNumber)>').map(i => ({ id: i[0], expires: i[1] })) : []),
-
-				voters: storageValue('cou:vrs', r => r ? deslice(r, 'Vec<T::AccountId>') : []),
-				candidates: candidates.mapEach((id, slot) => id.some(x => x) ? { slot, id, since: registerInfoOf(id).since } : null).map(l => l.filter(c => c)),
-				candidateInfoOf: registerInfoOf
-			};
-		}
-
-		{
-			let proposalVoters = storageMap('cov:voters:', r => r && deslice(r, 'Vec<AccountId>'));
-			let proposalVoteOf = storageMap('cov:vote:', r => r && !!r[0], i => new VecU8([...i[0], ...i[1]]));
-			this.councilVoting = {
-				cooloffPeriod: storageValue('cov:cooloff', r => deslice(r, 'BlockNumber')),
-				votingPeriod: storageValue('cov:period', r => deslice(r, 'BlockNumber')),
-				proposals: storageValue('cov:prs', r => deslice(r, 'Vec<(BlockNumber, Hash)>').map(i => ({
-					ends: i[0],
-					hash: i[1],
-					proposal: storageMap('cov:pro', r => r && deslice(r, 'Proposal'))(i[1]),
-					votes: proposalVoters(i[1]).map(r => r || []).mapEach(v => proposalVoteOf([i[1], v])).map(tally)
-				}))).map(x=>x, 2)
-			};
-		}
-
-		if (typeof window !== 'undefined') {
-			window.polkadot = this;
-			window.storageMap = storageMap;
-			window.storageValue = storageValue;
-		}
-*/
 	}
 }
 
