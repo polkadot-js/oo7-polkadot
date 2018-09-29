@@ -357,21 +357,19 @@ class NodeService {
 		let that = this;
 		this.ws = new WebSocket(uri)
 		this.ws.onopen = function () {
-			console.log('Connection open!')
+			console.log('Connection open')
 			let onceOpen = that.onceOpen;
 			that.onceOpen = []
 			window.setTimeout(() => onceOpen.forEach(f => f()), 0)
 		}
 		this.ws.onmessage = function (msg) {
 			let d = JSON.parse(msg.data)
-			console.log("Message from node", d)
+//			console.log("Message from node", d)
 			if (d.id) {
-				console.log("Reply.")
 				that.onreply[d.id](d)
 				delete that.onreply[d.id];
-			} else if (d.method && d.params && that.subscriptions[d.params.subscription]) {
-				console.log("Subscription. Callback: ", that.subscriptions[d.params.subscription])
-				that.subscriptions[d.params.subscription].callback(d.params.result, d.method)
+			} else if (d.method && d.params && that.subscriptions[d.method] && that.subscriptions[d.method][d.params.subscription]) {
+				that.subscriptions[d.method][d.params.subscription](d.params.result, d.method)
 			}
 
 			if (that.reconnect) {
@@ -389,14 +387,15 @@ class NodeService {
 	request (method, params = []) {
 		let that = this
 		let doSend = () => new Promise((resolve, reject) => {
-			console.log('Attempting send', that.ws.readyState)
 			let id = '' + this.index++;
-			that.ws.send(JSON.stringify({
+			let msg = {
 				"jsonrpc": "2.0",
 				"id": id,
 				"method": method,
 				"params": params
-			}))
+			};
+			that.ws.send(JSON.stringify(msg))
+//			console.log('Attempting send', msg)
 	
 			that.onreply[id] = msg => {
 				if (msg.error) {
@@ -411,7 +410,6 @@ class NodeService {
 			// still connecting
 			return new Promise(resolve => {
 				that.onceOpen.push(() => {
-					console.log("Opened: sending")
 					let res = doSend()
 					resolve(res)
 				})
@@ -421,24 +419,24 @@ class NodeService {
 		}
 	}
 	subscribe (method, params, callback) {
-		if (method.indexOf('_subscribe') == -1 && method.indexOf('_') != -1) {
-			method = method.replace(/_\w/, c => '_subscribe' + c[1].toUpperCase())
-		}
 		let that = this
-		return this.request(method, params).then(id => {
-			that.subscriptions[id] = { callback, method }
-			return id
+		let subscribeMethod = method.replace(/_\w/, c => '_subscribe' + c[1].toUpperCase())
+		return this.request(subscribeMethod, params).then(id => {
+			that.subscriptions[method] = that.subscriptions[method] || {}
+			that.subscriptions[method][id] = callback
+			return { method, id }
 		})
 	}
-	unsubscribe (id) {
+	unsubscribe ({method, id}) {
 		let that = this
-		if (!this.subscriptions[id]) {
-			throw 'Invalid subscription index'
-		}
-		let method = this.subscriptions[id].method.replace('_subscribe', '_unsubscribe')
+		let unsubscribeMethod = method.replace(/_\w/, c => '_unsubscribe' + c[1].toUpperCase())
 
-		return this.request(method, [id]).then(result => {
-			delete that.subscriptions[id]
+		if (!(this.subscriptions[method] && this.subscriptions[method][id])) {
+			throw 'Invalid subscription id'
+		}
+
+		return this.request(unsubscribeMethod, [id]).then(result => {
+			delete that.subscriptions[method][id]
 			return result
 		})
 	}
@@ -849,7 +847,7 @@ class Polkadot {
 		let that = this;
 		
 		this.chain = {
-			head = new SubscriptionBond('chain_newHead').subscriptable()
+			head: new SubscriptionBond('chain_newHead').subscriptable()
 		}
 		this.chain.height = this.chain.head.map(h => new BlockNumber(h.number))
 		this.chain.header = hashBond => new TransformBond(hash => service.request('chain_getHeader', [hash]), [hashBond]).subscriptable();
