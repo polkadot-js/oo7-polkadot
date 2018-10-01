@@ -1,7 +1,8 @@
-const {Bond, TimeBond, TransformBond} = require('oo7');
+const {Bond, TransformBond} = require('oo7');
 const XXH = require('xxhashjs');
 const {ss58_decode, ss58_encode} = require('ss58');
 const {camel, snake} = require('change-case');
+const nacl = require('tweetnacl');
 
 require('isomorphic-fetch');
 
@@ -28,15 +29,6 @@ class Balance extends Number {
 }
 class BlockNumber extends Number { toJSON() { return { _type: 'BlockNumber', data: this+0 } }}
 class Tuple extends Array { toJSON() { return { _type: 'Tuple', data: Array.from(this) } }}
-class CallProposal extends Object { constructor (isCall) { super(); this.isCall = isCall; } }
-class Proposal extends CallProposal {
-	constructor (o) { super(false); Object.assign(this, o) }
-	toJSON() { return { _type: 'Proposal', data: { module: this.module, name: this.name, params: this.params } } }
-}
-class Call extends CallProposal {
-	constructor (o) { super(true); Object.assign(this, o) }
-	toJSON() { return { _type: 'Call', data: { module: this.module, name: this.name, params: this.params } } }
-}
 
 function reviver(key, bland) {
 	if (typeof bland == 'object' && bland) {
@@ -48,8 +40,6 @@ function reviver(key, bland) {
 			case 'SlashPreference': return new SlashPreference(bland.data);
 			case 'Moment': return new Moment(bland.data);
 			case 'Tuple': return new Tuple(bland.data);
-			case 'Proposal': return new Proposal(bland.data);
-			case 'Call': return new Call(bland.data);
 			case 'Balance': return new Balance(bland.data);
 			case 'BlockNumber': return new BlockNumber(bland.data);
 		}
@@ -70,39 +60,41 @@ let transforms = {
 	ModuleMetadata: { name: 'String', call: 'CallMetadata' },
 	CallMetadata: { name: 'String', functions: 'Vec<FunctionMetadata>' },
 	FunctionMetadata: { id: 'u16', name: 'String', arguments: 'Vec<FunctionArgumentMetadata>', documentation: 'Vec<String>' },
-	FunctionArgumentMetadata: { name: 'String', type: 'Type' }
+	FunctionArgumentMetadata: { name: 'String', type: 'Type' },
+
+	Transaction: { version: 'u8', sender: 'Address', signature: 'Signature', index: 'Index', era: 'TransactionEra', call: 'Call' }
 };
 
-var deslicePrefix = 0;
+var decodePrefix = 0;
 
-function deslice(input, type) {
+function decode(input, type) {
 	if (typeof input.data === 'undefined') {
 		input = { data: input };
 	}
 	if (typeof type === 'object') {
-		return type.map(t => deslice(input, t));
+		return type.map(t => decode(input, t));
 	}
 	while (type.startsWith('T::')) {
 		type = type.slice(3);
 	}
 	let dataHex = bytesToHex(input.data.slice(0, 50));
-//	console.log(deslicePrefix + 'des >>>', type, dataHex);
-//	deslicePrefix +=  "   ";
+//	console.log(decodePrefix + 'des >>>', type, dataHex);
+//	decodePrefix +=  "   ";
 
 	let res;
 	let transform = transforms[type];
 	if (transform) {
 		if (typeof transform == 'string') {
-			res = deslice(input, transform);
+			res = decode(input, transform);
 		} else if (typeof transform == 'object') {
 			if (transform instanceof Array) {
 				// just a tuple
-				res = new Tuple(...deslice(input, transform));
+				res = new Tuple(...decode(input, transform));
 			} else if (!transform._enum) {
 				// a struct
 				res = {};
 				Object.keys(transform).forEach(k => {
-					res[k] = deslice(input, transform[k]);
+					res[k] = decode(input, transform[k]);
 				});
 			} else if (transform._enum instanceof Array) {
 				// simple enum
@@ -114,13 +106,13 @@ function deslice(input, type) {
 				let n = input.data[0];
 				input.data = input.data.slice(1);
 				let option = Object.keys(transform._enum)[n];
-				res = { option, value: deslice(input, transform._enum[option]) };
+				res = { option, value: decode(input, transform._enum[option]) };
 			}
 		}
 		res._type = type;
 	} else {
 		switch (type) {
-			case 'Call':
+/*			case 'Call':
 			case 'Proposal': {
 				let c = Calls[input.data[0]];
 				res = type === 'Call' ? new Call : new Proposal;
@@ -128,9 +120,9 @@ function deslice(input, type) {
 				c = c[type == 'Call' ? 'calls' : 'priv_calls'][input.data[1]];
 				input.data = input.data.slice(2);
 				res.name = c.name;
-				res.params = c.params.map(p => ({ name: p.name, type: p.type, value: deslice(input, p.type) }));
+				res.params = c.params.map(p => ({ name: p.name, type: p.type, value: decode(input, p.type) }));
 				break;
-			}
+			}*/
 			case 'AccountId': {
 				res = new AccountId(input.data.slice(0, 32));
 				input.data = input.data.slice(32);
@@ -166,9 +158,11 @@ function deslice(input, type) {
 				break;
 			}
 			case 'SlashPreference': {
-				res = new SlashPreference(deslice(input, 'u32'));
+				res = new SlashPreference(decode(input, 'u32'));
 				break;
 			}
+			case 'Compact<u128>':
+			case 'Compact<u64>':
 			case 'Compact<u32>':
 			case 'Compact<u16>':
 			case 'Compact<u8>': {
@@ -191,6 +185,10 @@ function deslice(input, type) {
 				input.data = input.data.slice(len);
 				break;
 			}
+			case 'u8':
+				res = leToNumber(input.data.slice(0, 1));
+				input.data = input.data.slice(1);
+				break;
 			case 'u16':
 				res = leToNumber(input.data.slice(0, 2));
 				input.data = input.data.slice(2);
@@ -203,52 +201,60 @@ function deslice(input, type) {
 				input.data = input.data.slice(4);
 				break;
 			}
+			case 'u64':
+			case 'Index': {
+				res = leToNumber(input.data.slice(0, 8));
+				input.data = input.data.slice(8);
+				break;
+			}
 			case 'bool': {
 				res = !!input.data[0];
 				input.data = input.data.slice(1);
 				break;
 			}
 			case 'KeyValue': {
-				res = deslice(input, '(Vec<u8>, Vec<u8>)');
+				res = decode(input, '(Vec<u8>, Vec<u8>)');
 				break;
 			}
 			case 'Vec<bool>': {
-				let size = deslice(input, 'Compact<u32>');
+				let size = decode(input, 'Compact<u32>');
 				res = [...input.data.slice(0, size)].map(a => !!a);
 				input.data = input.data.slice(size);
 				break;
 			}
 			case 'Vec<u8>': {
-				let size = deslice(input, 'Compact<u32>');
+				let size = decode(input, 'Compact<u32>');
 				res = input.data.slice(0, size);
 				input.data = input.data.slice(size);
 				break;
 			}
 			case 'String': {
-				let size = deslice(input, 'Compact<u32>');
+				let size = decode(input, 'Compact<u32>');
 				res = input.data.slice(0, size);
 				input.data = input.data.slice(size);
 				res = new TextDecoder("utf-8").decode(res);
 				break;
 			}
 			case 'Type': {
-				res = deslice(input, 'String');
-				res = res.replace('T::', '');
+				res = decode(input, 'String');
+				while (res.indexOf('T::') != -1) {
+					res = res.replace('T::', '');
+				}
 				res = res.match(/^Box<.*>$/) ? res.slice(4, -1) : res;
 				break;
 			}
 			default: {
 				let v = type.match(/^Vec<(.*)>$/);
 				if (v) {
-					let size = deslice(input, 'Compact<u32>');
-					res = [...new Array(size)].map(() => deslice(input, v[1]));
+					let size = decode(input, 'Compact<u32>');
+					res = [...new Array(size)].map(() => decode(input, v[1]));
 					break;
 				}
 				let o = type.match(/^Option<(.*)>$/);
 				if (o) {
-					let some = deslice(input, 'bool');
+					let some = decode(input, 'bool');
 					if (some) {
-						res = deslice(input, o[1]);
+						res = decode(input, o[1]);
 					} else {
 						res = null;
 					}
@@ -256,15 +262,15 @@ function deslice(input, type) {
 				}
 				let t = type.match(/^\((.*)\)$/);
 				if (t) {
-					res = new Tuple(...deslice(input, t[1].split(', ')));
+					res = new Tuple(...decode(input, t[1].split(', ')));
 					break;
 				}
-				throw 'Unknown type to deslice: ' + type;
+				throw 'Unknown type to decode: ' + type;
 			}
 		}
 	}
-//	deslicePrefix = deslicePrefix.substr(3);
-//	console.log(deslicePrefix + 'des <<<', type, res);
+//	decodePrefix = decodePrefix.substr(3);
+//	console.log(decodePrefix + 'des <<<', type, res);
 	return res;
 }
 
@@ -289,18 +295,25 @@ function pretty(expr) {
 		return 'SlashPreference{unstake_threshold=' + expr + '}';
 	}
 	if (expr instanceof Balance) {
+		let dotDenom = 1000000000000000;
 		return (
-			expr > 1000000000
-			? numberWithCommas(Math.round(expr / 1000000)) + ' DOT'
-			: expr > 100000000
-			? numberWithCommas(Math.round(expr / 100000) / 10) + ' DOT'
-			: expr > 10000000
-			? numberWithCommas(Math.round(expr / 10000) / 100) + ' DOT'
-			: expr > 1000000
-			? numberWithCommas(Math.round(expr / 1000) / 1000) + ' DOT'
-			: expr > 100000
-			? numberWithCommas(Math.round(expr / 100) / 10000) + ' DOT'
-			: numberWithCommas(expr) + ' µDOT'
+			expr == 0 || expr > dotDenom * 3000
+			? numberWithCommas(Math.round(expr / dotDenom)) + ' DOT'
+			: expr > dotDenom * 300
+			? numberWithCommas(Math.round(expr / (dotDenom / 10)) / 10) + ' DOT'
+			: expr > dotDenom * 30
+			? numberWithCommas(Math.round(expr / (dotDenom / 100)) / 100) + ' DOT'
+			: expr > dotDenom * 3
+			? numberWithCommas(Math.round(expr / (dotDenom / 1000)) / 1000) + ' DOT'
+			: expr > dotDenom / 3
+			? numberWithCommas(Math.round(expr / (dotDenom / 10000)) / 10000) + ' DOT'
+			: expr > dotDenom / 30
+			? numberWithCommas(Math.round(expr * 1000 / (dotDenom / 100)) / 100) + ' point'
+			: expr > dotDenom / 300
+			? numberWithCommas(Math.round(expr * 1000 / (dotDenom / 1000)) / 1000) + ' point'
+			: expr > dotDenom / 3000
+			? numberWithCommas(Math.round(expr * 1000 / (dotDenom / 10000)) / 10000) + ' point'
+			: numberWithCommas(expr) + ' planck'
 		);
 	}
 	if (expr instanceof BlockNumber) {
@@ -327,16 +340,6 @@ function pretty(expr) {
 	}
 	if (expr instanceof Array) {
 		return '[' + expr.map(pretty).join(', ') + ']';
-	}
-	if (expr instanceof Call || expr instanceof Proposal) {
-		return expr.module + '.' + expr.name + '(' + expr.params.map(p => {
-			let v = pretty(p.value);
-			if (v.length < 255) {
-				return p.name + '=' + v;
-			} else {
-				return p.name + '= [...]';
-			}
-		}).join(', ') + ')';
 	}
 	if (typeof expr === 'object') {
 		return '{' + Object.keys(expr).map(k => k + ': ' + pretty(expr[k])).join(', ') + '}';
@@ -489,22 +492,112 @@ class SubscriptionBond extends Bond {
 			service.unsubscribe(id);
 		});
 	}
-	map (f, outResolveDepth = 0, cache = undefined) {
-			return new TransformBond(f, [this], [], outResolveDepth, 1, cache);
-	}
-	sub (name, outResolveDepth = 0, cache = undefined) {
-			return new TransformBond((r, n) => r[n], [this, name], [], outResolveDepth, 1, cache);
-	}
-	static all(list, cache = undefined) {
-			return new TransformBond((...args) => args, list, [], 0, 1, cache);
+}
+
+class TransactionBond extends SubscriptionBond {
+	constructor (data) {
+		super('author_submitAndWatchExtrinsic', ['0x' + bytesToHex(data)])
 	}
 }
 
-/*class TransactionBond extends SubscriptionBond {
-	constructor (data) {
-		super()
+function makeTransaction(data) {
+	return new TransactionBond(data)
+}
+
+function composeTransaction (sender, call, index, era, checkpoint, senderAccount) {
+	if (typeof sender == 'string') {
+		sender = ss58_decode(sender)
 	}
-}*/
+	if (sender instanceof Uint8Array && sender.length == 32) {
+		senderAccount = sender
+	} else if (!senderAccount) {
+		throw `Invalid senderAccount when sender is account index`
+	}
+	let e = encoded([
+		index, call, era, checkpoint
+	], [
+		'Index', 'Call', 'TransactionEra', 'Hash'
+	])
+	let signature = secretStore.sign(senderAccount, e)
+
+	return encoded(encoded({
+		_type: 'Transaction',
+		version: 0x81,
+		sender,
+		signature,
+		index,
+		era,
+		call
+	}), 'Vec<u8>')
+}
+
+// tx = {
+//   sender
+//   call
+//   longevity?
+//   index?
+// }
+function post(tx) {
+	return new LatchBond(Bond.all([tx, polkadot().chain.height]).map(([o, height]) => {
+		let {sender, call, index, longevity} = o
+		if (typeof sender == 'number') {
+			// TODO: accept integer senders
+			throw 'Unsupported: account index for sender'
+		}
+		if (longevity) {
+			// TODO: use longevity with height to determine era and eraHash
+			throw 'Unsupported: eras in transactions'
+		}
+		return {
+			sender,
+			call,
+			era: new Uint8Array([0]),
+			eraHash: polkadot().genesisHash,
+			index: index || polkadot().runtime.system.accountNonce(sender),
+			senderAccount: sender
+		}
+	}, 2), { broadcasting: true }).map(o => o.broadcasting
+		? o
+		: new TransactionBond(composeTransaction(o.sender, o.call, o.index, o.era, o.eraHash, o.senderAccount))
+	)
+}
+
+/// Resolves to a default value when not ready. Once inputBond is ready,
+/// its value remains fixed indefinitely.
+class LatchBond extends Bond {
+	constructor (targetBond, def = undefined, mayBeNull = undefined, cache = null) {
+		super(typeof mayBeNull === 'undefined' ? targetBond._mayBeNull : mayBeNull, cache)
+
+		if (typeof(def) !== 'undefined') {
+			this._ready = true;
+			this._value = def;
+		}
+
+		let that = this
+		this._targetBond = targetBond
+		this._poll = () => {
+			if (targetBond._ready) {
+				that.changed(targetBond._value)
+				that._targetBond.unnotify(that._notifyId);
+				delete that._poll
+				delete that._targetBond
+			}
+		}
+	}
+
+	initialise () {
+		if (this._poll) {
+			this._notifyId = this._targetBond.notify(this._poll);
+			this._poll();
+		}
+	}
+
+	finalise () {
+		if (this._targetBond) {
+			this._targetBond.unnotify(this._notifyId);
+		}
+	}
+}
 
 function storageValueKey(stringLocation) {
 	let loc = stringToBytes(stringLocation);
@@ -517,11 +610,68 @@ function storageMapKey(prefixString, arg) {
 
 class StorageBond extends SubscriptionBond {
 	constructor (prefix, type, args = []) {
-		super('state_storage', [[ storageMapKey(prefix, args) ]], r => deslice(hexToBytes(r.changes[0][1]), type))
+		super('state_storage', [[ storageMapKey(prefix, args) ]], r => decode(hexToBytes(r.changes[0][1]), type))
 	}
 }
 
+class SecretStore {
+	constructor () {
+		this.keys = {}
+		this.seeds = []
+		this.names = {}
+		this._load()
+	}
+	submit (seed, name) {
+		let s = stringToSeed(seed);
+		let addr = this._addKey(s);
+		this.names[name] = ss58_encode(addr)
+		this._save()
+		return addr
+	}
+	accounts () {
+		return Object.keys(this.keys).map(ss58_decode)
+	}
+	find (n) {
+		let k = this.keys[this.names[n]]
+		return k && Object.assign({ address: this.names[n] }, k)
+	}
+	sign (from, data) {
+		if (from instanceof Uint8Array && from.length == 32 || from instanceof AccountId) {
+			from = ss58_encode(from)
+		}
+		console.info(`Signing data from ${from}`, bytesToHex(data))
+		let key = this.keys[from].key
+		return key ? nacl.sign.detached(data, key.secretKey) : null
+	}
+	_addKey (s) {
+		let key = nacl.sign.keyPair.fromSeed(s)
+		let addr = new AccountId(key.publicKey)
+		this.seeds.push(bytesToHex(s))
+		this.keys[ss58_encode(addr)] = { key }
+		return addr
+	}
+	_save () {
+		let ss = {
+			seeds: this.seeds,
+			names: this.names
+		}
+		localStorage.secretStore = JSON.stringify(ss)
+	}
+	_load () {
+		if (localStorage.secretStore) {
+			let o = JSON.parse(localStorage.secretStore)
+			o.seeds.forEach(seed => this._addKey(hexToBytes(seed)))
+			this.names = o.names
+		}
+	}
+}
+
+let secretStore = new SecretStore
+
 function stringToSeed(s) {
+	if (s.match(/^0x[0-9a-fA-F]{64}$/)) {
+		return new VecU8(hexToBytes(s))
+	}
 	var data = new VecU8(32);
 	data.fill(32);
 	for (var i = 0; i < s.length; i++){
@@ -641,43 +791,185 @@ function tallyAmounts(x) {
 	return {aye: r[1], nay: r[0]};
 }
 
-function encoded(key, type) {
-	if (typeof key == 'object' && key instanceof Uint8Array) {
-		return key
+function encoded(value, type = null) {
+	// if an array then just concat
+	if (type instanceof Array) {
+		if (value instanceof Array) {
+			let x = value.map((i, index) => encoded(i, type[index]));
+			let res = new Uint8Array();
+			x.forEach(x => {
+				r = new Uint8Array(res.length + x.length);
+				r.set(res)
+				r.set(x, res.length)
+				res = r
+			})
+			return res
+		} else {
+			throw 'If type if array, value must be too'
+		}
 	}
-	if (typeof key == 'string' && key.startsWith('0x')) {
-		return hexToBytes(key)
+	if (typeof value == 'object' && !type && value._type) {
+		type = value._type
+	}
+	if (typeof type != 'string') {
+		throw 'type must be either an array or a string'
+	}
+
+	if (typeof value == 'string' && value.startsWith('0x')) {
+		value = hexToBytes(value)
+	}
+
+	if (transforms[type]) {
+		let transform = transforms[type]
+		if (transform instanceof Array) {
+			// just a tuple
+			return encoded(value, transform)
+		} else if (!transform._enum) {
+			// a struct
+			let keys = []
+			let types = []
+			Object.keys(transform).forEach(k => {
+				keys.push(value[k])
+				types.push(transform[k])
+			})
+			return encoded(keys, types)
+		} else if (transform._enum instanceof Array) {
+			// simple enum
+			return new Uint8Array([transform._enum.indexOf(value.option)])
+		} else if (transform._enum) {
+			// enum
+			let index = Object.keys(transform._enum).indexOf(value.option)
+			let value = encoded(value.value, transform._enum[value.option])
+			return new Uint8Array([index, ...value])
+		}
 	}
 
 	// other type-specific transforms
-	if (type == 'AccountId' && typeof key == 'string') {
-		return ss58_decode(key);
+	if (type == 'Vec<u8>') {
+		if (typeof value == 'object' && value instanceof Uint8Array) {
+			return new Uint8Array([...encoded(value.length, 'Compact<u32>'), ...value])
+		}
+	}
+
+	if (type == 'Address' || type == 'RawAddress<AccountId, AccountIndex>') {
+		if (typeof value == 'string') {
+			value = ss58_decode(value)
+		}
+		if (typeof value == 'object' && value instanceof Uint8Array && value.length == 32) {
+			return new Uint8Array([0xff, ...value])
+		}
+		if (typeof value == 'number') {
+			if (value < 0xf0) {
+				return new Uint8Array([value])
+			} else if (value < 1 << 16) {
+				return new Uint8Array([0xfc, ...toLE(value, 2)])
+			} else if (value < 1 << 32) {
+				return new Uint8Array([0xfd, ...toLE(value, 4)])
+			} else if (value < 1 << 64) {
+				return new Uint8Array([0xfe, ...toLE(value, 8)])
+			}
+		}
+	}
+
+	if (type == 'AccountId') {
+		if (typeof value == 'string') {
+			return ss58_decode(value);
+		}
+		if (value instanceof Uint8Array && value.length == 32) {
+			return value
+		}
+	}
+
+	if (typeof value == 'number') {
+		switch (type) {
+			case 'Balance':
+			case 'u128':
+				return toLE(value, 16)
+			case 'Index':
+			case 'u64':
+				return toLE(value, 8)
+			case 'u32':
+				return toLE(value, 4)
+			case 'u16':
+				return toLE(value, 2)
+			case 'u8':
+				return toLE(value, 1)
+			default:
+				break
+		}
+	}
+
+	if (value instanceof Uint8Array) {
+		if (type == 'Signature' && value.length == 64) {
+			return value
+		}
+		if (type == 'Hash' && value.length == 32) {
+			return value
+		}
+	}
+
+	if (type == 'TransactionEra') {
+		return new Uint8Array([0])
+	}
+	
+	if (type.match(/^Compact<u[0-9]*>$/)) {
+		if (value < 1 << 6) {
+			return new Uint8Array([value << 2])
+		} else if (value < 1 << 14) {
+			return toLE((value << 2) + 1, 2)
+		} else if (value < 1 << 30) {
+			return toLE((value << 2) + 2, 4)
+		} else {
+			var v = [3, ...toLE(value, 4)]
+			let n = value >> 32
+			while (n > 0) {
+				v[0]++
+				v.push(n % 256)
+				n >>= 8
+			}
+			return new Uint8Array(v)
+		}
+	}
+
+	if (type == 'bool') {
+		return new Uint8Array([value ? 1 : 0])
 	}
 
 	if (typeof type == 'string' && type.match(/\(.*\)/)) {
-		return encoded(key, type.substr(1, type.length - 2).split(','))
+		return encoded(value, type.substr(1, type.length - 2).split(','))
 	}
 
-	// if an array then just concat
-	if (key instanceof Array && type instanceof Array) {
-		let x = key.map((i, index) => encoded(i, type[index]));
-		let res = new Uint8Array();
-		x.forEach(x => {
-			r = new Uint8Array(res.length + x.length);
-			r.set(res)
-			r.set(x, res.length)
-			res = r
-		})
-		return res
+	// Maybe it's pre-encoded?
+	if (typeof value == 'object' && value instanceof Uint8Array) {
+		switch (type) {
+			case 'Call':
+				break
+			default:
+				console.warn(`Value passed apparently pre-encoded without whitelisting ${type}`)
+		}
+		return value
 	}
+
+	throw `Value cannot be encoded as type: ${value}, ${type}`
+}
+
+let s_polkadot = null
+
+function polkadot() {
+	if (!s_polkadot) {
+		s_polkadot = new Polkadot
+	}
+	return s_polkadot
 }
 
 class Polkadot {
 	initialiseFromMetadata(m) {
 		this.metadata = m
 		this.runtime = {}
-		m.modules.forEach(m => {
+		this.call = {}
+		m.modules.forEach((m, module_index) => {
 			let o = {}
+			let c = {}
 			if (m.storage) {
 				let prefix = m.storage.prefix
 				m.storage.items.forEach(item => {
@@ -697,8 +989,27 @@ class Polkadot {
 						}
 					}
 				})
-				this.runtime[m.prefix] = o
 			}
+			if (m.module && m.module.call) {
+				m.module.call.functions.forEach(item => {
+					if (item.arguments.length > 0 && item.arguments[0].name == 'origin' && item.arguments[0].type == 'Origin') {
+						console.log(`Call ${m.prefix}/${item.name} names origin argument`)
+						item.arguments = item.arguments.slice(1)						
+					} else {
+						console.log(`Call ${m.prefix}/${item.name} does not name origin argument`)
+					}
+					c[camel(item.name)] = function (...args) {
+						if (args.length != item.arguments.length) {
+							throw `Invalid number of argments (${args.length} given, ${item.arguments.length} expected)`
+						}
+						let encoded_args = encoded(args, item.arguments.map(x => x.type))
+						return new Uint8Array([module_index - 1, item.id, ...encoded_args])
+					}
+					c[camel(item.name)].help = item.arguments.map(a => a.name)
+				})
+			}
+			this.runtime[m.prefix] = o
+			this.call[m.prefix] = c;
 		})
 		let that = this
 		m.modules.forEach(m => {
@@ -709,6 +1020,8 @@ class Polkadot {
 				}
 			}
 		})
+
+		this.ready()
 	}
 
 	addExtraSession () {
@@ -761,7 +1074,7 @@ class Polkadot {
 /*	//TODO
 		let referendumInfoOf = storageMap('dem:pro:', (r, index) => {
 			if (r == null) return null;
-			let [ends, proposal, voteThreshold] = deslice(r, ['BlockNumber', 'Proposal', 'VoteThreshold']);
+			let [ends, proposal, voteThreshold] = decode(r, ['BlockNumber', 'Proposal', 'VoteThreshold']);
 			return { index, ends, proposal, voteThreshold };
 		}, i => toLE(i, 4), x => x.map(x =>
 			Object.assign({votes: democracy.votersFor(x.index)
@@ -774,7 +1087,7 @@ class Polkadot {
 			}, x), 1));
 
 		this.democracy = {
-			proposed: storageValue('dem:pub', r => r ? deslice(r, 'Vec<(PropIndex, Proposal, AccountId)>') : []).map(is => is.map(i => {
+			proposed: storageValue('dem:pub', r => r ? decode(r, 'Vec<(PropIndex, Proposal, AccountId)>') : []).map(is => is.map(i => {
 				let d = depositOf(i[0]);
 				return { index: i[0], proposal: i[1], proposer: i[2], sponsors: d.map(v => v ? v.sponsors : null), bond: d.map(v => v ? v.bond : null) };
 			}), 2),
@@ -870,20 +1183,21 @@ class Polkadot {
 
 	constructor () {
 		let that = this;
+		s_polkadot = this;
 		
 		this.chain = {
 			head: new SubscriptionBond('chain_newHead').subscriptable()
 		}
 		this.chain.height = this.chain.head.map(h => new BlockNumber(h.number))
 		this.chain.header = hashBond => new TransformBond(hash => service.request('chain_getHeader', [hash]), [hashBond]).subscriptable();
-		
+		service.request('chain_getBlockHash', [0]).then(h => that.genesisHash = hexToBytes(h))
 		this.system = {
 			name: new TransformBond(() => service.request('system_name')).subscriptable(),
 			version: new TransformBond(() => service.request('system_version')).subscriptable(),
 			chain: new TransformBond(() => service.request('system_chain')).subscriptable()
 		}
 		this.state = {
-			authorityCount: new SubscriptionBond('state_storage', [['0x' + bytesToHex(stringToBytes(':auth:len'))]], r => deslice(hexToBytes(r.changes[0][1]), 'u32')),
+			authorityCount: new SubscriptionBond('state_storage', [['0x' + bytesToHex(stringToBytes(':auth:len'))]], r => decode(hexToBytes(r.changes[0][1]), 'u32')),
 			code: new SubscriptionBond('state_storage', [['0x' + bytesToHex(stringToBytes(':code'))]], r => hexToBytes(r.changes[0][1])),
 			codeHash: new TransformBond(() => service.request('state_getStorageHash', ['0x' + bytesToHex(stringToBytes(":code"))]).then(hexToBytes), [], [this.chain.head]),
 			codeSize: new TransformBond(() => service.request('state_getStorageSize', ['0x' + bytesToHex(stringToBytes(":code"))]), [], [this.chain.head])
@@ -892,12 +1206,27 @@ class Polkadot {
 			n => [...Array(n)].map((_, i) =>
 				new SubscriptionBond('state_storage',
 					[[ '0x' + bytesToHex(stringToBytes(":auth:")) + bytesToHex(toLE(i, 4)) ]],
-					r => deslice(hexToBytes(r.changes[0][1]), 'AccountId')
+					r => decode(hexToBytes(r.changes[0][1]), 'AccountId')
 				)
 			), 2);
 
-		service.request('state_getMetadata').then(blob => deslice(new Uint8Array(blob), 'RuntimeMetadata'))
+		service.request('state_getMetadata')
+			.then(blob => decode(hexToBytes(blob), 'RuntimeMetadata'))
 			.then(m => that.initialiseFromMetadata(m))
+
+		this.onReady = []
+	}
+
+	whenReady (callback) {
+		if (this.onReady instanceof Array) {
+			this.onReady.push(callback)
+		} else {
+			callback()
+		}
+	}
+	ready () {
+		this.onReady.forEach(x => x())
+		delete this.onReady
 	}
 }
 
@@ -912,14 +1241,64 @@ if (typeof window !== 'undefined') {
 	window.storageMapKey = storageMapKey;
 	window.storageValueKey = storageValueKey;
 	window.pretty = pretty;
-	window.deslice = deslice;
+	window.decode = decode;
 	window.service = service;
 	window.SubscriptionBond = SubscriptionBond;
+	window.TransactionBond = SubscriptionBond;
 	window.StorageBond = StorageBond;
+	window.nacl = nacl;
+	window.secretStore = secretStore;
+	window.encoded = encoded;
+	window.makeTransaction = makeTransaction;
+	window.post = post;
+	window.Bond = Bond;
 }
+
+
+
+const denominations = [ 'planck', 'Kpl', 'Mpl', 'µdot', 'point', 'dot', 'blob', 'megadot' ];
+
+function interpretRender(s, defaultDenom = 4) {
+	try {
+	let m = s.toLowerCase().match(/([0-9,]+)(\.([0-9]*))? *([a-zA-Z]+)?/);
+		let di = m[4] ? denominations.indexOf(m[4]) : defaultDenom;
+		if (di === -1) {
+			return null;
+		}
+		let n = (m[1].replace(',', '').replace(/^0*/, '')) || '0';
+		let d = (m[3] || '').replace(/0*$/, '');
+		return { denom: di, units: n, decimals: d, origNum: m[1] + (m[2] || ''), origDenom: m[4] || '' };
+	}
+	catch (e) {
+		return null;
+	}
+}
+
+function formatValueNoDenom(n) {
+	return `${n.units.toString().replace(/(\d)(?=(\d{3})+$)/g, '$1,')}${n.decimals ? '.' + n.decimals : ''}`;
+}
+
+function combineValue(v) {
+	let d = Math.pow(1000, v.denom);
+	let n = v.units;
+	if (v.decimals) {
+		n += v.decimals;
+		d /= Math.pow(10, v.decimals.length);
+	}
+	return n * d;
+}
+
+function defDenom(v, d) {
+	if (v.denom === null) {
+		v.denom = d;
+	}
+	return v;
+}
+
 
 module.exports = { ss58_decode, ss58_encode, pretty, stringToSeed, stringToBytes,
 	hexToBytes, bytesToHex, toLEHex, leHexToNumber, toLE,
 	leToNumber, Polkadot, reviver, AccountId, Hash, VoteThreshold, Moment, Balance,
-	BlockNumber, Tuple, Proposal, Call
+	BlockNumber, Tuple, TransactionBond, secretStore, polkadot, post,
+	denominations, interpretRender, formatValueNoDenom, combineValue, defDenom
 }
