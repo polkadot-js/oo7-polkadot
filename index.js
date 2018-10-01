@@ -470,11 +470,15 @@ class NodeService {
 let service = new NodeService;
 
 class SubscriptionBond extends Bond {
-	constructor (name, params = [], xform = null, cache = { id: null, stringify: JSON.stringify, parse: JSON.parse }, mayBeNull) {
+	constructor (name, params = [], xform = null, def = undefined, cache = { id: null, stringify: JSON.stringify, parse: JSON.parse }, mayBeNull) {
 		super(mayBeNull, cache);
 		this.name = name;
 		this.params = params;
 		this.xform = xform;
+		if (typeof def !== 'undefined' && (def !== null || mayBeNull)) {
+			this._value = def;
+			this._ready = true;
+		}
 	}
 	initialise () {
 		let that = this;
@@ -496,7 +500,7 @@ class SubscriptionBond extends Bond {
 
 class TransactionBond extends SubscriptionBond {
 	constructor (data) {
-		super('author_submitAndWatchExtrinsic', ['0x' + bytesToHex(data)])
+		super('author_submitAndWatchExtrinsic', ['0x' + bytesToHex(data)], null, {sending: true})
 	}
 }
 
@@ -505,30 +509,33 @@ function makeTransaction(data) {
 }
 
 function composeTransaction (sender, call, index, era, checkpoint, senderAccount) {
-	if (typeof sender == 'string') {
-		sender = ss58_decode(sender)
-	}
-	if (sender instanceof Uint8Array && sender.length == 32) {
-		senderAccount = sender
-	} else if (!senderAccount) {
-		throw `Invalid senderAccount when sender is account index`
-	}
-	let e = encoded([
-		index, call, era, checkpoint
-	], [
-		'Index', 'Call', 'TransactionEra', 'Hash'
-	])
-	let signature = secretStore.sign(senderAccount, e)
-
-	return encoded(encoded({
-		_type: 'Transaction',
-		version: 0x81,
-		sender,
-		signature,
-		index,
-		era,
-		call
-	}), 'Vec<u8>')
+	return new Promise((resolve, reject) => {
+		if (typeof sender == 'string') {
+			sender = ss58_decode(sender)
+		}
+		if (sender instanceof Uint8Array && sender.length == 32) {
+			senderAccount = sender
+		} else if (!senderAccount) {
+			reject(`Invalid senderAccount when sender is account index`)
+		}
+		let e = encoded([
+			index, call, era, checkpoint
+		], [
+			'Index', 'Call', 'TransactionEra', 'Hash'
+		])
+	
+		let signature = secretStore.sign(senderAccount, e)
+		let signedData = encoded(encoded({
+			_type: 'Transaction',
+			version: 0x81,
+			sender,
+			signature,
+			index,
+			era,
+			call
+		}), 'Vec<u8>')
+		window.setTimeout(() => resolve(signedData), 2000)
+	})
 }
 
 // tx = {
@@ -556,10 +563,11 @@ function post(tx) {
 			index: index || polkadot().runtime.system.accountNonce(sender),
 			senderAccount: sender
 		}
-	}, 2), { broadcasting: true }).map(o => o.broadcasting
-		? o
-		: new TransactionBond(composeTransaction(o.sender, o.call, o.index, o.era, o.eraHash, o.senderAccount))
-	)
+	}, 2), null).map(o => {
+		return o && composeTransaction(o.sender, o.call, o.index, o.era, o.eraHash, o.senderAccount)
+	}).map(composed => {
+		return composed ? new TransactionBond(composed) : { signing: true }
+	})
 }
 
 /// Resolves to a default value when not ready. Once inputBond is ready,
